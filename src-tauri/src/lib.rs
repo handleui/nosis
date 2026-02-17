@@ -32,9 +32,8 @@ pub fn run() {
                 .pragma("cache_size", "-64000")
                 .pragma("temp_store", "MEMORY")
                 .pragma("mmap_size", "268435456")
-                // Cap the WAL file at 64 MB to prevent unbounded growth on desktop
-                .pragma("wal_autocheckpoint", "1000")
-                .pragma("journal_size_limit", "67108864")
+                // Cap the WAL file at ~64 MB to prevent unbounded growth on desktop
+                .pragma("wal_autocheckpoint", "16000")
                 .optimize_on_close(true, Some(400));
 
             let pool = tauri::async_runtime::block_on(async {

@@ -58,12 +58,16 @@ pub async fn create_conversation(
 ) -> Result<Conversation, AppError> {
     let pool = get_pool(&app)?;
     let id = gen_id();
+
+    // Validate user-provided title before applying the default
+    if let Some(ref t) = title {
+        if t.trim().is_empty() {
+            return Err(AppError::Validation("Title must not be empty".into()));
+        }
+    }
+
     let title = title.unwrap_or_else(|| "New Conversation".to_string());
 
-    // Validate title is not empty/whitespace and within length limits
-    if title.trim().is_empty() {
-        return Err(AppError::Validation("Title must not be empty".into()));
-    }
     if title.len() > MAX_TITLE_LENGTH {
         return Err(AppError::Validation(format!(
             "Title exceeds maximum length of {} characters",
