@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check": "ultracite check",
+    "fix": "ultracite fix",
+    "prepare": "lefthook install"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -15,8 +18,17 @@
     "@tauri-apps/plugin-stronghold": "^2"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.3.15",
     "@tauri-apps/cli": "^2",
+    "lefthook": "^2.1.1",
+    "lint-staged": "^16.2.7",
     "typescript": "^5.9.0",
+    "ultracite": "7.2.2",
     "vite": "^6.3.0"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,json,jsonc,css,scss,md,mdx}": [
+      "bun x ultracite fix"
+    ]
   }
 }

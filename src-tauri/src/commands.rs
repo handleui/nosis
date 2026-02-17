@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool};
 use tauri::{AppHandle, Manager};
@@ -32,27 +33,19 @@ const MAX_CONTENT_LENGTH: usize = 100_000; // ~100KB of text
 const MAX_MODEL_LENGTH: usize = 100;
 const DEFAULT_PAGE_SIZE: i32 = 100;
 
-fn sanitize_db_error(err: sqlx::Error) -> String {
-    // Log the actual error for debugging
-    eprintln!("Database error: {:?}", err);
-    // Don't leak internal database error details to frontend
-    "Operation failed".to_string()
-}
-
 fn gen_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
 /// Validate that a string is a valid UUID v4 to prevent malformed IDs from reaching the database.
-fn validate_uuid(id: &str) -> Result<(), String> {
-    uuid::Uuid::parse_str(id)
-        .map_err(|_| "Invalid ID format".to_string())?;
+fn validate_uuid(id: &str) -> Result<(), AppError> {
+    uuid::Uuid::parse_str(id).map_err(|_| AppError::InvalidId)?;
     Ok(())
 }
 
-fn get_pool(app: &AppHandle) -> Result<&SqlitePool, String> {
+fn get_pool(app: &AppHandle) -> Result<&SqlitePool, AppError> {
     app.try_state::<SqlitePool>()
-        .ok_or_else(|| "Database not initialized".to_string())
+        .ok_or(AppError::DbNotInitialized)
         .map(|state| state.inner())
 }
 
@@ -62,26 +55,35 @@ fn get_pool(app: &AppHandle) -> Result<&SqlitePool, String> {
 pub async fn create_conversation(
     app: AppHandle,
     title: Option<String>,
-) -> Result<Conversation, String> {
+) -> Result<Conversation, AppError> {
     let pool = get_pool(&app)?;
     let id = gen_id();
+
+    // Validate user-provided title before applying the default
+    if let Some(ref t) = title {
+        if t.trim().is_empty() {
+            return Err(AppError::Validation("Title must not be empty".into()));
+        }
+    }
+
     let title = title.unwrap_or_else(|| "New Conversation".to_string());
 
-    // Validate title length
     if title.len() > MAX_TITLE_LENGTH {
-        return Err(format!("Title exceeds maximum length of {} characters", MAX_TITLE_LENGTH));
+        return Err(AppError::Validation(format!(
+            "Title exceeds maximum length of {} characters",
+            MAX_TITLE_LENGTH
+        )));
     }
 
     // Use query_as with RETURNING to avoid manual Row::get() calls
-    sqlx::query_as::<Sqlite, Conversation>(
+    Ok(sqlx::query_as::<Sqlite, Conversation>(
         "INSERT INTO conversations (id, title) VALUES (?, ?)
          RETURNING id, title, created_at, updated_at",
     )
     .bind(&id)
     .bind(&title)
     .fetch_one(pool)
-    .await
-    .map_err(sanitize_db_error)
+    .await?)
 }
 
 #[tauri::command]
@@ -89,19 +91,18 @@ pub async fn list_conversations(
     app: AppHandle,
     limit: Option<i32>,
     offset: Option<i32>,
-) -> Result<Vec<Conversation>, String> {
+) -> Result<Vec<Conversation>, AppError> {
     let pool = get_pool(&app)?;
     let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
     let offset = offset.unwrap_or(0).max(0);
 
-    sqlx::query_as::<Sqlite, Conversation>(
+    Ok(sqlx::query_as::<Sqlite, Conversation>(
         "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
     )
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
-    .await
-    .map_err(sanitize_db_error)
+    .await?)
 }
 
 #[tauri::command]
@@ -109,12 +110,18 @@ pub async fn update_conversation_title(
     app: AppHandle,
     id: String,
     title: String,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     validate_uuid(&id)?;
 
-    // Validate title length
+    // Validate title is not empty/whitespace and within length limits
+    if title.trim().is_empty() {
+        return Err(AppError::Validation("Title must not be empty".into()));
+    }
     if title.len() > MAX_TITLE_LENGTH {
-        return Err(format!("Title exceeds maximum length of {} characters", MAX_TITLE_LENGTH));
+        return Err(AppError::Validation(format!(
+            "Title exceeds maximum length of {} characters",
+            MAX_TITLE_LENGTH
+        )));
     }
 
     let pool = get_pool(&app)?;
@@ -122,29 +129,27 @@ pub async fn update_conversation_title(
         .bind(&title)
         .bind(&id)
         .execute(pool)
-        .await
-        .map_err(sanitize_db_error)?;
+        .await?;
 
     if result.rows_affected() == 0 {
-        return Err("Conversation not found".to_string());
+        return Err(AppError::NotFound("Conversation"));
     }
 
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), AppError> {
     validate_uuid(&id)?;
     let pool = get_pool(&app)?;
     // CASCADE foreign key will automatically delete associated messages
     let result = sqlx::query("DELETE FROM conversations WHERE id = ?")
         .bind(&id)
         .execute(pool)
-        .await
-        .map_err(sanitize_db_error)?;
+        .await?;
 
     if result.rows_affected() == 0 {
-        return Err("Conversation not found".to_string());
+        return Err(AppError::NotFound("Conversation"));
     }
 
     Ok(())
@@ -158,13 +163,13 @@ pub async fn get_messages(
     conversation_id: String,
     limit: Option<i32>,
     offset: Option<i32>,
-) -> Result<Vec<Message>, String> {
+) -> Result<Vec<Message>, AppError> {
     validate_uuid(&conversation_id)?;
     let pool = get_pool(&app)?;
     let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
     let offset = offset.unwrap_or(0).max(0);
 
-    sqlx::query_as::<Sqlite, Message>(
+    Ok(sqlx::query_as::<Sqlite, Message>(
         "SELECT id, conversation_id, role, content, model, tokens_in, tokens_out, created_at
          FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
     )
@@ -172,8 +177,7 @@ pub async fn get_messages(
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
-    .await
-    .map_err(sanitize_db_error)
+    .await?)
 }
 
 #[tauri::command]
@@ -185,38 +189,50 @@ pub async fn save_message(
     model: Option<String>,
     tokens_in: Option<i64>,
     tokens_out: Option<i64>,
-) -> Result<Message, String> {
+) -> Result<Message, AppError> {
     validate_uuid(&conversation_id)?;
 
     // Validate role before database operation
     if !matches!(role.as_str(), "user" | "assistant" | "system") {
-        return Err("Invalid role: must be 'user', 'assistant', or 'system'".to_string());
+        return Err(AppError::Validation(
+            "Invalid role: must be 'user', 'assistant', or 'system'".into(),
+        ));
     }
 
     // Validate content is not empty and within length limits
     if content.trim().is_empty() {
-        return Err("Content must not be empty".to_string());
+        return Err(AppError::Validation("Content must not be empty".into()));
     }
     if content.len() > MAX_CONTENT_LENGTH {
-        return Err(format!("Content exceeds maximum length of {} characters", MAX_CONTENT_LENGTH));
+        return Err(AppError::Validation(format!(
+            "Content exceeds maximum length of {} characters",
+            MAX_CONTENT_LENGTH
+        )));
     }
 
     // Validate model length if provided
     if let Some(ref m) = model {
         if m.len() > MAX_MODEL_LENGTH {
-            return Err(format!("Model name exceeds maximum length of {} characters", MAX_MODEL_LENGTH));
+            return Err(AppError::Validation(format!(
+                "Model name exceeds maximum length of {} characters",
+                MAX_MODEL_LENGTH
+            )));
         }
     }
 
     // Validate token counts are non-negative
     if let Some(t) = tokens_in {
         if t < 0 {
-            return Err("tokens_in must be non-negative".to_string());
+            return Err(AppError::Validation(
+                "tokens_in must be non-negative".into(),
+            ));
         }
     }
     if let Some(t) = tokens_out {
         if t < 0 {
-            return Err("tokens_out must be non-negative".to_string());
+            return Err(AppError::Validation(
+                "tokens_out must be non-negative".into(),
+            ));
         }
     }
 
@@ -224,16 +240,15 @@ pub async fn save_message(
     let id = gen_id();
 
     // Use transaction to batch UPDATE + INSERT, then use RETURNING to avoid separate SELECT
-    let mut tx = pool.begin().await.map_err(sanitize_db_error)?;
+    let mut tx = pool.begin().await?;
 
     let update_result = sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
         .bind(&conversation_id)
         .execute(&mut *tx)
-        .await
-        .map_err(sanitize_db_error)?;
+        .await?;
 
     if update_result.rows_affected() == 0 {
-        return Err("Conversation not found".to_string());
+        return Err(AppError::NotFound("Conversation"));
     }
 
     // Use query_as with RETURNING to avoid manual Row::get() calls
@@ -249,10 +264,9 @@ pub async fn save_message(
     .bind(tokens_in)
     .bind(tokens_out)
     .fetch_one(&mut *tx)
-    .await
-    .map_err(sanitize_db_error)?;
+    .await?;
 
-    tx.commit().await.map_err(sanitize_db_error)?;
+    tx.commit().await?;
 
     Ok(message)
 }

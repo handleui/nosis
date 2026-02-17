@@ -2530,6 +2530,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-stronghold",
+ "thiserror 2.0.18",
  "uuid",
 ]
 
