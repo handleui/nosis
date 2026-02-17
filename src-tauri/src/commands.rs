@@ -409,7 +409,8 @@ pub async fn store_api_key(app: AppHandle, key: String) -> Result<(), AppError> 
     .await?;
 
     let cache = get_api_key_cache(&app)?;
-    *cache.0.lock().unwrap() = Some(key);
+    let mut guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
+    *guard = Some(key);
 
     Ok(())
 }
@@ -417,7 +418,7 @@ pub async fn store_api_key(app: AppHandle, key: String) -> Result<(), AppError> 
 #[tauri::command]
 pub async fn has_api_key(app: AppHandle) -> Result<bool, AppError> {
     let cache = get_api_key_cache(&app)?;
-    let guard = cache.0.lock().unwrap();
+    let guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
     Ok(guard.is_some())
 }
 
@@ -430,7 +431,8 @@ pub async fn delete_api_key(app: AppHandle) -> Result<(), AppError> {
         .await?;
 
     let cache = get_api_key_cache(&app)?;
-    *cache.0.lock().unwrap() = None;
+    let mut guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
+    *guard = None;
 
     Ok(())
 }
@@ -456,7 +458,7 @@ pub async fn search_web(
 
     let cache = get_api_key_cache(&app)?;
     let api_key = {
-        let guard = cache.0.lock().unwrap();
+        let guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
         guard.clone().ok_or(AppError::ApiKeyNotConfigured)?
     };
 
