@@ -20,5 +20,11 @@ tauri-plugin-global-shortcut = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-argon2 = "0.5"
-getrandom = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+# Optimize for size with LTO for smaller, faster desktop app binary
+lto = true
+opt-level = "s"
+codegen-units = 1
+strip = true

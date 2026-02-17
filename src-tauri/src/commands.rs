@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Row, Sqlite, SqlitePool};
-use std::sync::Arc;
+use sqlx::{FromRow, Sqlite, SqlitePool};
 use tauri::{AppHandle, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 // ── Types ──
 
@@ -31,6 +30,7 @@ pub struct Message {
 const MAX_TITLE_LENGTH: usize = 500;
 const MAX_CONTENT_LENGTH: usize = 100_000; // ~100KB of text
 const MAX_MODEL_LENGTH: usize = 100;
+const DEFAULT_PAGE_SIZE: i32 = 100;
 
 fn sanitize_db_error(err: sqlx::Error) -> String {
     // Log the actual error for debugging
@@ -40,24 +40,20 @@ fn sanitize_db_error(err: sqlx::Error) -> String {
 }
 
 fn gen_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    uuid::Uuid::new_v4().to_string()
+}
 
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time before UNIX epoch")
-        .as_nanos();
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    format!("{:x}{:x}", ts, counter)
+/// Validate that a string is a valid UUID v4 to prevent malformed IDs from reaching the database.
+fn validate_uuid(id: &str) -> Result<(), String> {
+    uuid::Uuid::parse_str(id)
+        .map_err(|_| "Invalid ID format".to_string())?;
+    Ok(())
 }
 
 fn get_pool(app: &AppHandle) -> Result<&SqlitePool, String> {
-    app.try_state::<Arc<SqlitePool>>()
+    app.try_state::<SqlitePool>()
         .ok_or_else(|| "Database not initialized".to_string())
-        .map(|state| state.inner().as_ref())
+        .map(|state| state.inner())
 }
 
 // ── Conversation Commands ──
@@ -76,7 +72,8 @@ pub async fn create_conversation(
         return Err(format!("Title exceeds maximum length of {} characters", MAX_TITLE_LENGTH));
     }
 
-    let result = sqlx::query(
+    // Use query_as with RETURNING to avoid manual Row::get() calls
+    sqlx::query_as::<Sqlite, Conversation>(
         "INSERT INTO conversations (id, title) VALUES (?, ?)
          RETURNING id, title, created_at, updated_at",
     )
@@ -84,22 +81,24 @@ pub async fn create_conversation(
     .bind(&title)
     .fetch_one(pool)
     .await
-    .map_err(sanitize_db_error)?;
-
-    Ok(Conversation {
-        id: result.get("id"),
-        title: result.get("title"),
-        created_at: result.get("created_at"),
-        updated_at: result.get("updated_at"),
-    })
+    .map_err(sanitize_db_error)
 }
 
 #[tauri::command]
-pub async fn list_conversations(app: AppHandle) -> Result<Vec<Conversation>, String> {
+pub async fn list_conversations(
+    app: AppHandle,
+    limit: Option<i32>,
+    offset: Option<i32>,
+) -> Result<Vec<Conversation>, String> {
     let pool = get_pool(&app)?;
+    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
+    let offset = offset.unwrap_or(0).max(0);
+
     sqlx::query_as::<Sqlite, Conversation>(
-        "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC",
+        "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(sanitize_db_error)
@@ -111,30 +110,43 @@ pub async fn update_conversation_title(
     id: String,
     title: String,
 ) -> Result<(), String> {
+    validate_uuid(&id)?;
+
     // Validate title length
     if title.len() > MAX_TITLE_LENGTH {
         return Err(format!("Title exceeds maximum length of {} characters", MAX_TITLE_LENGTH));
     }
 
     let pool = get_pool(&app)?;
-    sqlx::query("UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ?")
+    let result = sqlx::query("UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(&title)
         .bind(&id)
         .execute(pool)
         .await
         .map_err(sanitize_db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err("Conversation not found".to_string());
+    }
+
     Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), String> {
+    validate_uuid(&id)?;
     let pool = get_pool(&app)?;
     // CASCADE foreign key will automatically delete associated messages
-    sqlx::query("DELETE FROM conversations WHERE id = ?")
+    let result = sqlx::query("DELETE FROM conversations WHERE id = ?")
         .bind(&id)
         .execute(pool)
         .await
         .map_err(sanitize_db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err("Conversation not found".to_string());
+    }
+
     Ok(())
 }
 
@@ -144,13 +156,21 @@ pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), Strin
 pub async fn get_messages(
     app: AppHandle,
     conversation_id: String,
+    limit: Option<i32>,
+    offset: Option<i32>,
 ) -> Result<Vec<Message>, String> {
+    validate_uuid(&conversation_id)?;
     let pool = get_pool(&app)?;
+    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
+    let offset = offset.unwrap_or(0).max(0);
+
     sqlx::query_as::<Sqlite, Message>(
         "SELECT id, conversation_id, role, content, model, tokens_in, tokens_out, created_at
-         FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+         FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
     )
     .bind(&conversation_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(sanitize_db_error)
@@ -166,12 +186,17 @@ pub async fn save_message(
     tokens_in: Option<i64>,
     tokens_out: Option<i64>,
 ) -> Result<Message, String> {
+    validate_uuid(&conversation_id)?;
+
     // Validate role before database operation
     if !matches!(role.as_str(), "user" | "assistant" | "system") {
         return Err("Invalid role: must be 'user', 'assistant', or 'system'".to_string());
     }
 
-    // Validate content length
+    // Validate content is not empty and within length limits
+    if content.trim().is_empty() {
+        return Err("Content must not be empty".to_string());
+    }
     if content.len() > MAX_CONTENT_LENGTH {
         return Err(format!("Content exceeds maximum length of {} characters", MAX_CONTENT_LENGTH));
     }
@@ -201,13 +226,18 @@ pub async fn save_message(
     // Use transaction to batch UPDATE + INSERT, then use RETURNING to avoid separate SELECT
     let mut tx = pool.begin().await.map_err(sanitize_db_error)?;
 
-    sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
+    let update_result = sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
         .bind(&conversation_id)
         .execute(&mut *tx)
         .await
         .map_err(sanitize_db_error)?;
 
-    let result = sqlx::query(
+    if update_result.rows_affected() == 0 {
+        return Err("Conversation not found".to_string());
+    }
+
+    // Use query_as with RETURNING to avoid manual Row::get() calls
+    let message = sqlx::query_as::<Sqlite, Message>(
         "INSERT INTO messages (id, conversation_id, role, content, model, tokens_in, tokens_out)
          VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
     )
@@ -224,25 +254,15 @@ pub async fn save_message(
 
     tx.commit().await.map_err(sanitize_db_error)?;
 
-    Ok(Message {
-        id: result.get("id"),
-        conversation_id: result.get("conversation_id"),
-        role: result.get("role"),
-        content: result.get("content"),
-        model: result.get("model"),
-        tokens_in: result.get("tokens_in"),
-        tokens_out: result.get("tokens_out"),
-        created_at: result.get("created_at"),
-    })
+    Ok(message)
 }
 
 // ── Global Hotkey ──
 
 pub fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let shortcut: Shortcut = "Alt+Space".parse()?;
-
+    // on_shortcut accepts &str directly via TryInto<ShortcutWrapper>
     app.global_shortcut().on_shortcut(
-        shortcut,
+        "Alt+Space",
         move |app_handle, _shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 if let Some(window) = app_handle.get_webview_window("main") {
