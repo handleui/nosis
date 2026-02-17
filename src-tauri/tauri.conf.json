@@ -1,0 +1,37 @@
+{
+  "productName": "Muppet",
+  "version": "0.1.0",
+  "identifier": "com.muppet.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost 'self'; font-src 'self'"
+    },
+    "windows": [
+      {
+        "title": "Muppet",
+        "width": 720,
+        "height": 560,
+        "resizable": true,
+        "center": true,
+        "decorations": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  },
+  "plugins": {
+    "stronghold": {
+      "maxAge": null
+    },
+    "global-shortcut": {}
+  }
+}
