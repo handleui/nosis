@@ -13,6 +13,7 @@ muppet/
 │   │   ├── main.rs          # Binary entry — calls muppet_lib::run()
 │   │   ├── lib.rs           # Tauri builder, plugin setup, DB pool init
 │   │   ├── db.rs            # Versioned migration runner
+│   │   ├── error.rs         # AppError enum (thiserror + Serialize for IPC)
 │   │   └── commands.rs      # Tauri IPC command handlers (CRUD + hotkey)
 │   ├── capabilities/
 │   │   └── default.json     # Tauri permission grants for the main window

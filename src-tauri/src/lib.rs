@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod error;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tauri::Manager;
@@ -20,18 +21,20 @@ pub fn run() {
 
             // Initialize sqlx connection pool using SqliteConnectOptions (idiomatic sqlx 0.8).
             // PRAGMAs are applied via connect options instead of after_connect callbacks.
-            // Notes on defaults that don't need explicit configuration:
-            //   - foreign_keys is ON by default in sqlx-sqlite 0.8
-            //   - busy_timeout defaults to 5 seconds
+            // busy_timeout defaults to 5 seconds in sqlx.
             let db_path = app_data_dir.join("muppet.db");
             let connect_opts = SqliteConnectOptions::new()
                 .filename(&db_path)
                 .create_if_missing(true)
                 .journal_mode(SqliteJournalMode::Wal)
                 .synchronous(SqliteSynchronous::Normal)
+                .foreign_keys(true)
                 .pragma("cache_size", "-64000")
                 .pragma("temp_store", "MEMORY")
                 .pragma("mmap_size", "268435456")
+                // Cap the WAL file at 64 MB to prevent unbounded growth on desktop
+                .pragma("wal_autocheckpoint", "1000")
+                .pragma("journal_size_limit", "67108864")
                 .optimize_on_close(true, Some(400));
 
             let pool = tauri::async_runtime::block_on(async {

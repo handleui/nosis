@@ -16,6 +16,7 @@ Rust backend compiles on `cargo tauri dev` automatically. Frontend is Vite on po
 
 - `src-tauri/src/lib.rs` — Tauri app builder, plugin init, DB pool setup
 - `src-tauri/src/db.rs` — Versioned migration runner
+- `src-tauri/src/error.rs` — `AppError` enum (thiserror-based, Serialize for IPC)
 - `src-tauri/src/commands.rs` — All IPC command handlers
 - `src/` — Frontend (Svelte + TypeScript, minimal for now)
 
@@ -30,7 +31,7 @@ See `ARCHITECTURE.md` for full details.
 - Validate all inputs (UUIDs, lengths, enums) before hitting the database
 - Sanitize DB errors — never leak internal details to the frontend
 - New migrations go in `db.rs` as the next version number in `versioned_migrations()`
-- Use `thiserror` for error types (planned — currently uses String)
+- Use `thiserror` for error types — `AppError` enum in `error.rs`
 
 ### Frontend
 
