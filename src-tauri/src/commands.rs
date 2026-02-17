@@ -6,10 +6,12 @@ use crate::supermemory::{self, AddDocumentRequest, AddDocumentResponse, Supermem
 use crate::vault::ApiKeyVault;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tracing::{error, info, instrument};
 use zeroize::Zeroize;
+
+use crate::placement::{self, PlacementMode, PlacementState};
 
 // ── Types ──
 
@@ -443,6 +445,25 @@ pub async fn set_supermemory_api_key(
     Ok(())
 }
 
+// ── Placement Commands ──
+
+#[tauri::command]
+pub fn set_placement_mode(app: AppHandle, mode: PlacementMode) -> Result<(), String> {
+    let state = app.state::<PlacementState>();
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Main window not found")?;
+
+    placement::apply_placement(&window, mode)?;
+    {
+        let mut guard = state.mode.lock()
+            .map_err(|e| format!("Failed to lock placement state: {}", e))?;
+        *guard = mode;
+    }
+    placement::save_state(&state)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn supermemory_add(
     app: AppHandle,
@@ -664,25 +685,96 @@ pub async fn get_api_key(
     }
 }
 
+#[tauri::command]
+pub fn get_placement_mode(app: AppHandle) -> Result<PlacementMode, String> {
+    let state = app.state::<PlacementState>();
+    let mode = state.mode.lock()
+        .map_err(|e| format!("Failed to lock placement state: {}", e))
+        .map(|guard| *guard)?;
+    Ok(mode)
+}
+
 // ── Global Hotkey ──
 
+fn get_main_window(app_handle: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app_handle.get_webview_window("main")
+}
+
+fn show_and_focus(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn set_mode(app_handle: &AppHandle, mode: PlacementMode) {
+    let Some(window) = get_main_window(app_handle) else { return };
+    let Some(state) = app_handle.try_state::<PlacementState>() else { return };
+
+    let _ = placement::apply_placement(&window, mode);
+    if let Ok(mut guard) = state.mode.lock() {
+        *guard = mode;
+    }
+    placement::save_state_async(&state);
+}
+
+fn summon(app_handle: &AppHandle) {
+    let Some(window) = get_main_window(app_handle) else { return };
+
+    let was_visible = window.is_visible().unwrap_or(false);
+    show_and_focus(&window);
+
+    if !was_visible {
+        reapply_current_placement(app_handle, &window);
+    }
+
+    let _ = window.emit("new_thread", ());
+}
+
+fn reapply_current_placement(app_handle: &AppHandle, window: &tauri::WebviewWindow) {
+    let Some(state) = app_handle.try_state::<PlacementState>() else { return };
+    let Ok(guard) = state.mode.lock() else { return };
+    let _ = placement::apply_placement(window, *guard);
+}
+
+fn dismiss(app_handle: &AppHandle) {
+    let Some(window) = get_main_window(app_handle) else { return };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    }
+}
+
+fn set_mode_if_visible(app_handle: &AppHandle, mode: PlacementMode) {
+    let Some(window) = get_main_window(app_handle) else { return };
+    if !window.is_visible().unwrap_or(false) { return };
+
+    let Some(state) = app_handle.try_state::<PlacementState>() else { return };
+    if let Ok(guard) = state.mode.lock() {
+        if *guard == mode { return; } // Skip if already in this mode
+    }
+
+    set_mode(app_handle, mode);
+}
+
+const PLACEMENT_HOTKEYS: &[(&str, PlacementMode)] = &[
+    ("Alt+ArrowLeft", PlacementMode::SidebarLeft),
+    ("Alt+ArrowRight", PlacementMode::SidebarRight),
+    ("Alt+ArrowUp", PlacementMode::Center),
+    ("Alt+ArrowDown", PlacementMode::Compact),
+];
+
 pub fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    app.global_shortcut().on_shortcut(
-        "Alt+Space",
-        move |app_handle, _shortcut, event| {
-            if event.state != ShortcutState::Pressed {
-                return;
-            }
-            let Some(window) = app_handle.get_webview_window("main") else {
-                return;
-            };
-            if window.is_visible().unwrap_or(false) {
-                let _ = window.hide();
-            } else {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        },
-    )?;
+    app.global_shortcut().on_shortcut("Alt+Space", move |h, _, e| {
+        if e.state == ShortcutState::Pressed { summon(h); }
+    })?;
+
+    app.global_shortcut().on_shortcut("Escape", move |h, _, e| {
+        if e.state == ShortcutState::Pressed { dismiss(h); }
+    })?;
+
+    for &(key, mode) in PLACEMENT_HOTKEYS {
+        app.global_shortcut().on_shortcut(key, move |h, _, e| {
+            if e.state == ShortcutState::Pressed { set_mode_if_visible(h, mode); }
+        })?;
+    }
+
     Ok(())
 }

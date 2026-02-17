@@ -17,7 +17,7 @@ export function streamChat(
   conversationId: string,
   messages: ChatMessage[],
   model: string,
-  callbacks: StreamCallbacks,
+  callbacks: StreamCallbacks
 ): { promise: Promise<void>; cancel: () => void } {
   const abortController = new AbortController();
 
@@ -29,7 +29,7 @@ export function streamChat(
     });
     if (!apiKey) {
       throw new Error(
-        "Anthropic API key not configured. Use store_api_key to set it.",
+        "Anthropic API key not configured. Use store_api_key to set it."
       );
     }
 
@@ -79,7 +79,10 @@ export function streamChat(
     // Sanitize error messages to prevent accidental API key leakage.
     // SDK/HTTP errors may include headers or URLs containing the key.
     const raw = err.message ?? "Stream failed";
-    const safe = raw.replace(/\b(sk-ant-|sk-)[A-Za-z0-9_-]{10,}\b/g, "[REDACTED]");
+    const safe = raw.replace(
+      /\b(sk-ant-|sk-)[A-Za-z0-9_-]{10,}\b/g,
+      "[REDACTED]"
+    );
     callbacks.onError?.(safe);
   });
 

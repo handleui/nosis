@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
+    "check-types": "tsc --noEmit",
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "ultracite check",
@@ -25,6 +26,7 @@
     "@tauri-apps/cli": "^2",
     "lefthook": "^2.1.1",
     "lint-staged": "^16.2.7",
+    "turbo": "^2",
     "typescript": "^5.9.0",
     "ultracite": "7.2.2",
     "vite": "^6.3.0"

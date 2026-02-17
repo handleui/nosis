@@ -42,7 +42,7 @@ function exposeDevGlobals() {
   (window as any).__muppet_streamChat = (
     conversationId: string,
     messages: ChatMessage[],
-    model: string,
+    model: string
   ) =>
     streamChat(conversationId, messages, model, {
       onToken: (t) => console.log("[token]", t),

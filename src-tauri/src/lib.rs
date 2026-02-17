@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod exa;
+mod placement;
 mod supermemory;
 mod vault;
 
@@ -222,7 +223,18 @@ pub fn run() {
             let api_vault = init_api_key_vault(&app_data_dir, &salt);
             app.manage(std::sync::Mutex::new(api_vault));
 
+            let placement_file = app_data_dir.join("placement.json");
+            let initial_mode = placement::load_state(&placement_file);
+            app.manage(placement::PlacementState {
+                mode: std::sync::Mutex::new(initial_mode),
+                state_file: placement_file,
+            });
+
             commands::register_hotkey(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = placement::apply_placement(&window, initial_mode);
+            }
 
             Ok(())
         })
@@ -244,6 +256,8 @@ pub fn run() {
             commands::set_setting,
             commands::store_api_key,
             commands::get_api_key,
+            commands::set_placement_mode,
+            commands::get_placement_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running muppet");
