@@ -1,8 +1,12 @@
-use crate::error::AppError;
+use std::sync::{Arc, RwLock};
+
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+use crate::error::AppError;
+use crate::supermemory::{AddDocumentRequest, AddDocumentResponse, SearchRequest, SearchResponse, SupermemoryClient};
 
 // ── Types ──
 
@@ -33,11 +37,16 @@ const MAX_CONTENT_LENGTH: usize = 100_000; // ~100KB of text
 const MAX_MODEL_LENGTH: usize = 100;
 const DEFAULT_PAGE_SIZE: i32 = 100;
 
+// Supermemory-specific limits
+const MAX_SUPERMEMORY_CONTENT_LENGTH: usize = 1_000_000; // Supermemory API 1MB text limit
+const MAX_SUPERMEMORY_TAG_LENGTH: usize = 200;
+const MAX_SUPERMEMORY_QUERY_LENGTH: usize = 10_000;
+const MAX_SUPERMEMORY_API_KEY_LENGTH: usize = 256;
+
 fn gen_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Validate that a string is a valid UUID v4 to prevent malformed IDs from reaching the database.
 fn validate_uuid(id: &str) -> Result<(), AppError> {
     uuid::Uuid::parse_str(id).map_err(|_| AppError::InvalidId)?;
     Ok(())
@@ -49,6 +58,30 @@ fn get_pool(app: &AppHandle) -> Result<&SqlitePool, AppError> {
         .map(|state| state.inner())
 }
 
+fn validate_not_empty(value: &str, field: &str) -> Result<(), AppError> {
+    if value.trim().is_empty() {
+        return Err(AppError::Validation(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_max_length(value: &str, max: usize, field: &str) -> Result<(), AppError> {
+    if value.len() > max {
+        return Err(AppError::Validation(format!(
+            "{field} exceeds maximum length of {max} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_tag(tag: &Option<String>, max: usize) -> Result<(), AppError> {
+    if let Some(ref t) = tag {
+        validate_not_empty(t, "Container tag")?;
+        validate_max_length(t, max, "Container tag")?;
+    }
+    Ok(())
+}
+
 // ── Conversation Commands ──
 
 #[tauri::command]
@@ -56,26 +89,15 @@ pub async fn create_conversation(
     app: AppHandle,
     title: Option<String>,
 ) -> Result<Conversation, AppError> {
+    if let Some(ref t) = title {
+        validate_not_empty(t, "Title")?;
+    }
+    let title = title.unwrap_or_else(|| "New Conversation".to_string());
+    validate_max_length(&title, MAX_TITLE_LENGTH, "Title")?;
+
     let pool = get_pool(&app)?;
     let id = gen_id();
 
-    // Validate user-provided title before applying the default
-    if let Some(ref t) = title {
-        if t.trim().is_empty() {
-            return Err(AppError::Validation("Title must not be empty".into()));
-        }
-    }
-
-    let title = title.unwrap_or_else(|| "New Conversation".to_string());
-
-    if title.len() > MAX_TITLE_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Title exceeds maximum length of {} characters",
-            MAX_TITLE_LENGTH
-        )));
-    }
-
-    // Use query_as with RETURNING to avoid manual Row::get() calls
     Ok(sqlx::query_as::<Sqlite, Conversation>(
         "INSERT INTO conversations (id, title) VALUES (?, ?)
          RETURNING id, title, created_at, updated_at",
@@ -112,17 +134,8 @@ pub async fn update_conversation_title(
     title: String,
 ) -> Result<(), AppError> {
     validate_uuid(&id)?;
-
-    // Validate title is not empty/whitespace and within length limits
-    if title.trim().is_empty() {
-        return Err(AppError::Validation("Title must not be empty".into()));
-    }
-    if title.len() > MAX_TITLE_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Title exceeds maximum length of {} characters",
-            MAX_TITLE_LENGTH
-        )));
-    }
+    validate_not_empty(&title, "Title")?;
+    validate_max_length(&title, MAX_TITLE_LENGTH, "Title")?;
 
     let pool = get_pool(&app)?;
     let result = sqlx::query("UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ?")
@@ -142,7 +155,6 @@ pub async fn update_conversation_title(
 pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), AppError> {
     validate_uuid(&id)?;
     let pool = get_pool(&app)?;
-    // CASCADE foreign key will automatically delete associated messages
     let result = sqlx::query("DELETE FROM conversations WHERE id = ?")
         .bind(&id)
         .execute(pool)
@@ -180,6 +192,44 @@ pub async fn get_messages(
     .await?)
 }
 
+fn validate_message_inputs(
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    model: &Option<String>,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
+) -> Result<(), AppError> {
+    validate_uuid(conversation_id)?;
+
+    if !matches!(role, "user" | "assistant" | "system") {
+        return Err(AppError::Validation(
+            "Invalid role: must be 'user', 'assistant', or 'system'".into(),
+        ));
+    }
+
+    validate_not_empty(content, "Content")?;
+    validate_max_length(content, MAX_CONTENT_LENGTH, "Content")?;
+
+    if let Some(ref m) = model {
+        validate_max_length(m, MAX_MODEL_LENGTH, "Model name")?;
+    }
+
+    fn require_non_negative(value: Option<i64>, field: &str) -> Result<(), AppError> {
+        if let Some(v) = value {
+            if v < 0 {
+                return Err(AppError::Validation(format!("{field} must be non-negative")));
+            }
+        }
+        Ok(())
+    }
+
+    require_non_negative(tokens_in, "tokens_in")?;
+    require_non_negative(tokens_out, "tokens_out")?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn save_message(
     app: AppHandle,
@@ -190,56 +240,10 @@ pub async fn save_message(
     tokens_in: Option<i64>,
     tokens_out: Option<i64>,
 ) -> Result<Message, AppError> {
-    validate_uuid(&conversation_id)?;
-
-    // Validate role before database operation
-    if !matches!(role.as_str(), "user" | "assistant" | "system") {
-        return Err(AppError::Validation(
-            "Invalid role: must be 'user', 'assistant', or 'system'".into(),
-        ));
-    }
-
-    // Validate content is not empty and within length limits
-    if content.trim().is_empty() {
-        return Err(AppError::Validation("Content must not be empty".into()));
-    }
-    if content.len() > MAX_CONTENT_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Content exceeds maximum length of {} characters",
-            MAX_CONTENT_LENGTH
-        )));
-    }
-
-    // Validate model length if provided
-    if let Some(ref m) = model {
-        if m.len() > MAX_MODEL_LENGTH {
-            return Err(AppError::Validation(format!(
-                "Model name exceeds maximum length of {} characters",
-                MAX_MODEL_LENGTH
-            )));
-        }
-    }
-
-    // Validate token counts are non-negative
-    if let Some(t) = tokens_in {
-        if t < 0 {
-            return Err(AppError::Validation(
-                "tokens_in must be non-negative".into(),
-            ));
-        }
-    }
-    if let Some(t) = tokens_out {
-        if t < 0 {
-            return Err(AppError::Validation(
-                "tokens_out must be non-negative".into(),
-            ));
-        }
-    }
+    validate_message_inputs(&conversation_id, &role, &content, &model, tokens_in, tokens_out)?;
 
     let pool = get_pool(&app)?;
     let id = gen_id();
-
-    // Use transaction to batch UPDATE + INSERT, then use RETURNING to avoid separate SELECT
     let mut tx = pool.begin().await?;
 
     let update_result = sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
@@ -251,7 +255,6 @@ pub async fn save_message(
         return Err(AppError::NotFound("Conversation"));
     }
 
-    // Use query_as with RETURNING to avoid manual Row::get() calls
     let message = sqlx::query_as::<Sqlite, Message>(
         "INSERT INTO messages (id, conversation_id, role, content, model, tokens_in, tokens_out)
          VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
@@ -267,29 +270,109 @@ pub async fn save_message(
     .await?;
 
     tx.commit().await?;
-
     Ok(message)
+}
+
+// ── Supermemory Commands ──
+
+fn get_supermemory_client(app: &AppHandle) -> Result<Arc<SupermemoryClient>, AppError> {
+    let state = app
+        .try_state::<RwLock<Option<Arc<SupermemoryClient>>>>()
+        .ok_or(AppError::SupermemoryNotConfigured)?;
+    let guard = state.read().map_err(|e| {
+        eprintln!("Supermemory RwLock poisoned (read): {e}");
+        AppError::SupermemoryNotConfigured
+    })?;
+    guard
+        .as_ref()
+        .cloned()
+        .ok_or(AppError::SupermemoryNotConfigured)
+}
+
+#[tauri::command]
+pub async fn set_supermemory_api_key(
+    app: AppHandle,
+    api_key: String,
+) -> Result<(), AppError> {
+    if api_key.trim().is_empty() {
+        return Err(AppError::Validation("API key must not be empty".into()));
+    }
+    if api_key.len() > MAX_SUPERMEMORY_API_KEY_LENGTH {
+        return Err(AppError::Validation("API key is too long".into()));
+    }
+
+    let client = SupermemoryClient::new(api_key)?;
+    let state = app.state::<RwLock<Option<Arc<SupermemoryClient>>>>();
+    let mut guard = state.write().map_err(|e| {
+        eprintln!("Supermemory RwLock poisoned (write): {e}");
+        AppError::SupermemoryNotConfigured
+    })?;
+    *guard = Some(Arc::new(client));
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn supermemory_add(
+    app: AppHandle,
+    content: String,
+    container_tag: Option<String>,
+) -> Result<AddDocumentResponse, AppError> {
+    validate_not_empty(&content, "Content")?;
+    validate_max_length(&content, MAX_SUPERMEMORY_CONTENT_LENGTH, "Content")?;
+    validate_optional_tag(&container_tag, MAX_SUPERMEMORY_TAG_LENGTH)?;
+
+    let client = get_supermemory_client(&app)?;
+    let req = AddDocumentRequest {
+        content,
+        custom_id: None,
+        container_tag,
+    };
+
+    Ok(client.add_document(&req).await?)
+}
+
+#[tauri::command]
+pub async fn supermemory_search(
+    app: AppHandle,
+    q: String,
+    container_tag: Option<String>,
+    limit: Option<u32>,
+) -> Result<SearchResponse, AppError> {
+    validate_not_empty(&q, "Search query")?;
+    validate_max_length(&q, MAX_SUPERMEMORY_QUERY_LENGTH, "Search query")?;
+    validate_optional_tag(&container_tag, MAX_SUPERMEMORY_TAG_LENGTH)?;
+
+    let client = get_supermemory_client(&app)?;
+    let req = SearchRequest {
+        q,
+        container_tag,
+        limit: limit.map(|l| l.clamp(1, 100)),
+        threshold: None,
+    };
+
+    Ok(client.search(&req).await?)
 }
 
 // ── Global Hotkey ──
 
 pub fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // on_shortcut accepts &str directly via TryInto<ShortcutWrapper>
     app.global_shortcut().on_shortcut(
         "Alt+Space",
         move |app_handle, _shortcut, event| {
-            if event.state == ShortcutState::Pressed {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                    } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                }
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            let Some(window) = app_handle.get_webview_window("main") else {
+                return;
+            };
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.hide();
+            } else {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
         },
     )?;
-
     Ok(())
 }

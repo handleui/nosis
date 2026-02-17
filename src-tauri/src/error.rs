@@ -20,15 +20,22 @@ pub enum AppError {
 
     #[error("{0}")]
     Validation(String),
+
+    #[error("Memory service unavailable")]
+    SupermemoryNotConfigured,
+
+    #[error("Memory service error")]
+    Supermemory(#[from] crate::supermemory::SupermemoryError),
 }
 
 /// Serialize only the display message so the frontend never sees internal details.
 /// Tauri requires the error type to implement `Serialize` for IPC transport.
 impl Serialize for AppError {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // For Database errors, log the real error and return a sanitized message
-        if let AppError::Database(ref inner) = self {
-            eprintln!("Database error: {:?}", inner);
+        match self {
+            AppError::Database(ref inner) => eprintln!("Database error: {:?}", inner),
+            AppError::Supermemory(ref inner) => eprintln!("Supermemory error: {:?}", inner),
+            _ => {}
         }
         serializer.serialize_str(&self.to_string())
     }
