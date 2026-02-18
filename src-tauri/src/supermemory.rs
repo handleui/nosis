@@ -1,10 +1,12 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use zeroize::Zeroize;
 
 const DOCUMENTS_URL: &str = "https://api.supermemory.ai/v3/documents";
 const SEARCH_URL: &str = "https://api.supermemory.ai/v4/search";
 const MAX_ERROR_BODY: usize = 1024;
+/// Maximum response body size (5 MiB). Prevents OOM from oversized API responses.
+const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 /// Truncate a string to at most `max_len` bytes on a valid char boundary.
 fn truncate_to_char_boundary(mut s: String, max_len: usize) -> String {
@@ -16,7 +18,6 @@ fn truncate_to_char_boundary(mut s: String, max_len: usize) -> String {
     s
 }
 
-#[derive(Clone)]
 pub(crate) struct SupermemoryClient {
     http: Client,
     api_key: String,
@@ -37,14 +38,14 @@ impl std::fmt::Debug for SupermemoryClient {
 /// leaking sensitive data (Bearer tokens, headers) through logs or IPC.
 #[derive(thiserror::Error)]
 pub(crate) enum SupermemoryError {
-    #[error("Failed to build HTTP client")]
-    HttpClient(reqwest::Error),
-
     #[error("Request failed")]
     Request(reqwest::Error),
 
+    #[error("Failed to read response body")]
+    ReadBody(reqwest::Error),
+
     #[error("Failed to parse response")]
-    Deserialize(reqwest::Error),
+    Parse(serde_json::Error),
 
     #[error("API error (HTTP {status})")]
     Api { status: u16, message: String },
@@ -54,9 +55,9 @@ pub(crate) enum SupermemoryError {
 impl std::fmt::Debug for SupermemoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HttpClient(_) => f.debug_tuple("HttpClient").field(&"<redacted>").finish(),
             Self::Request(_) => f.debug_tuple("Request").field(&"<redacted>").finish(),
-            Self::Deserialize(_) => f.debug_tuple("Deserialize").field(&"<redacted>").finish(),
+            Self::ReadBody(_) => f.debug_tuple("ReadBody").field(&"<redacted>").finish(),
+            Self::Parse(_) => f.debug_tuple("Parse").field(&"<redacted>").finish(),
             Self::Api { status, .. } => f
                 .debug_struct("Api")
                 .field("status", status)
@@ -118,16 +119,15 @@ pub(crate) struct SearchChunk {
     pub(crate) score: f64,
 }
 
-impl SupermemoryClient {
-    pub(crate) fn new(api_key: String) -> Result<Self, SupermemoryError> {
-        let http = Client::builder()
-            .user_agent("muppet/0.1.0")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(SupermemoryError::HttpClient)?;
+impl Drop for SupermemoryClient {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
+    }
+}
 
-        Ok(Self { http, api_key })
+impl SupermemoryClient {
+    pub(crate) fn new(http: Client, api_key: String) -> Self {
+        Self { http, api_key }
     }
 
     pub(crate) async fn add_document(
@@ -168,7 +168,24 @@ impl SupermemoryClient {
     ) -> Result<T, SupermemoryError> {
         let status = resp.status();
         if status.is_success() {
-            return resp.json::<T>().await.map_err(SupermemoryError::Deserialize);
+            // Check Content-Length header *before* buffering to avoid OOM on huge responses.
+            if let Some(len) = resp.content_length() {
+                if len > MAX_RESPONSE_BYTES as u64 {
+                    return Err(SupermemoryError::Api {
+                        status: status.as_u16(),
+                        message: format!("Response Content-Length too large ({len} bytes)"),
+                    });
+                }
+            }
+            let bytes = resp.bytes().await.map_err(SupermemoryError::ReadBody)?;
+            // Still check actual size: Content-Length can be absent or lie (chunked encoding).
+            if bytes.len() > MAX_RESPONSE_BYTES {
+                return Err(SupermemoryError::Api {
+                    status: status.as_u16(),
+                    message: format!("Response body too large ({} bytes)", bytes.len()),
+                });
+            }
+            return serde_json::from_slice::<T>(&bytes).map_err(SupermemoryError::Parse);
         }
 
         let body = truncate_to_char_boundary(resp.text().await.unwrap_or_default(), MAX_ERROR_BODY);

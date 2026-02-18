@@ -17,11 +17,12 @@ export function streamChat(
   conversationId: string,
   messages: ChatMessage[],
   model: string,
-  callbacks: StreamCallbacks,
+  callbacks: StreamCallbacks
 ): { promise: Promise<void>; cancel: () => void } {
   const abortController = new AbortController();
 
-  let fullContent = "";
+  // Collect chunks in an array to avoid O(n^2) string concatenation per token.
+  const chunks: string[] = [];
 
   const promise = (async () => {
     const apiKey = await invoke<string | null>("get_api_key", {
@@ -29,7 +30,7 @@ export function streamChat(
     });
     if (!apiKey) {
       throw new Error(
-        "Anthropic API key not configured. Use store_api_key to set it.",
+        "Anthropic API key not configured. Use store_api_key to set it."
       );
     }
 
@@ -42,11 +43,13 @@ export function streamChat(
       abortSignal: abortController.signal,
     });
     for await (const chunk of result.textStream) {
-      fullContent += chunk;
+      chunks.push(chunk);
       callbacks.onToken(chunk);
     }
 
-    const usage = await result.usage.catch(() => ({
+    const fullContent = chunks.join("");
+
+    const usage = await Promise.resolve(result.usage).catch(() => ({
       inputTokens: null,
       outputTokens: null,
     }));
@@ -62,6 +65,7 @@ export function streamChat(
 
     callbacks.onDone?.(fullContent, model);
   })().catch(async (err) => {
+    const fullContent = chunks.join("");
     if (err.name === "AbortError") {
       if (fullContent) {
         await invoke("save_message", {
@@ -71,7 +75,9 @@ export function streamChat(
           model,
           tokensIn: null,
           tokensOut: null,
-        }).catch(() => {});
+        }).catch(() => {
+          // Best-effort save on abort; failure is non-critical
+        });
       }
       callbacks.onDone?.(fullContent, model);
       return;
@@ -79,7 +85,10 @@ export function streamChat(
     // Sanitize error messages to prevent accidental API key leakage.
     // SDK/HTTP errors may include headers or URLs containing the key.
     const raw = err.message ?? "Stream failed";
-    const safe = raw.replace(/\b(sk-ant-|sk-)[A-Za-z0-9_-]{10,}\b/g, "[REDACTED]");
+    const safe = raw.replace(
+      /\b(sk-ant-|sk-)[A-Za-z0-9_-]{10,}\b/g,
+      "[REDACTED]"
+    );
     callbacks.onError?.(safe);
   });
 

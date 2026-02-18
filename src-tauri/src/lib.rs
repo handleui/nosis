@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod exa;
+mod placement;
 mod supermemory;
 mod vault;
 
@@ -11,6 +12,7 @@ use std::path::Path;
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
+use zeroize::Zeroize;
 
 fn get_or_create_salt(path: &std::path::Path) -> [u8; 32] {
     use std::fs::OpenOptions;
@@ -111,6 +113,10 @@ fn init_api_key_vault(app_data_dir: &std::path::Path, salt: &[u8; 32]) -> vault:
     let vault_path = app_data_dir.join("api-keys.hold");
     let snapshot_path = iota_stronghold::SnapshotPath::from_path(&vault_path);
 
+    // SECURITY: The hardcoded password means encryption-at-rest relies solely on filesystem
+    // permissions (salt file + .hold file), NOT on a user-supplied secret. An attacker with read
+    // access to the app data directory can derive the same key and decrypt the vault offline.
+    // For stronger protection, gate the root secret behind macOS Keychain / biometrics.
     let vault_key = zeroize::Zeroizing::new(
         argon2::hash_raw(b"muppet-api-keys", salt, &argon2_config())
             .expect("failed to derive vault key"),
@@ -182,12 +188,20 @@ async fn init_db_pool(app_data_dir: &Path) -> Result<SqlitePool, Box<dyn std::er
     Ok(pool)
 }
 
-async fn load_cached_exa_key(pool: &SqlitePool) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'exa_api_key'")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
+/// Load the Exa API key from the vault into memory for fast access.
+fn load_cached_exa_key_from_vault(vault: &vault::ApiKeyVault) -> Option<String> {
+    let client = vault.stronghold.get_client(b"api-keys").ok()?;
+    let store_key = b"api_key:exa";
+    match client.store().get(store_key) {
+        Ok(Some(data)) => match String::from_utf8(data) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                e.into_bytes().zeroize();
+                None
+            }
+        },
+        _ => None,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -206,11 +220,16 @@ pub fn run() {
             ensure_app_data_dir(&app_data_dir);
 
             let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
-            let cached_api_key = tauri::async_runtime::block_on(load_cached_exa_key(&pool));
 
             app.manage(pool);
-            app.manage(reqwest::Client::new());
-            app.manage(commands::ExaKeyCache(std::sync::Mutex::new(cached_api_key)));
+            app.manage(
+                reqwest::Client::builder()
+                    .user_agent("muppet/0.1.0")
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .expect("failed to build HTTP client"),
+            );
 
             app.manage(
                 std::sync::RwLock::new(Option::<std::sync::Arc<supermemory::SupermemoryClient>>::None),
@@ -220,9 +239,25 @@ pub fn run() {
             init_stronghold_plugin(app.handle(), salt)?;
 
             let api_vault = init_api_key_vault(&app_data_dir, &salt);
+            let cached_exa_key = load_cached_exa_key_from_vault(&api_vault);
+            app.manage(commands::ExaKeyCache(std::sync::Mutex::new(cached_exa_key)));
+            app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
             app.manage(std::sync::Mutex::new(api_vault));
 
+            let placement_file = app_data_dir.join("placement.json");
+            let initial_mode = placement::load_state(&placement_file);
+            app.manage(placement::PlacementState {
+                mode: std::sync::Mutex::new(initial_mode),
+                state_file: placement_file,
+            });
+
             commands::register_hotkey(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = placement::apply_placement(&window, initial_mode) {
+                    tracing::warn!(error = %e, "startup placement failed — window may not be positioned correctly");
+                }
+            }
 
             Ok(())
         })
@@ -244,6 +279,11 @@ pub fn run() {
             commands::set_setting,
             commands::store_api_key,
             commands::get_api_key,
+            commands::has_api_key,
+            commands::delete_api_key,
+            commands::set_placement_mode,
+            commands::get_placement_mode,
+            commands::dismiss_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running muppet");
