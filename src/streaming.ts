@@ -7,11 +7,6 @@ import {
   createAgentForConversation,
 } from "./letta";
 
-export interface ChatMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-}
-
 export interface StreamCallbacks {
   onToken: (content: string) => void;
   onDone?: (fullContent: string) => void;
@@ -94,7 +89,7 @@ function redactTokens(message: string): string {
 
 async function executeStream(
   conversationId: string,
-  messages: ChatMessage[],
+  prompt: string,
   callbacks: StreamCallbacks,
   abortSignal: AbortSignal,
   chunks: string[]
@@ -103,17 +98,12 @@ async function executeStream(
   const letta = getOrCreateProvider(apiKey);
   const agentId = await resolveAgentId(conversationId, letta);
 
-  const latestMessage = messages.at(-1);
-  if (!latestMessage) {
-    throw new Error("No messages to send");
-  }
-
   const result = streamText({
     model: letta(),
     providerOptions: {
       letta: { agent: { id: agentId, streamTokens: true } },
     },
-    prompt: latestMessage.content,
+    prompt,
     abortSignal,
   });
 
@@ -150,7 +140,7 @@ async function handleStreamError(
 
 export function streamChat(
   conversationId: string,
-  messages: ChatMessage[],
+  prompt: string,
   callbacks: StreamCallbacks
 ): { promise: Promise<void>; cancel: () => void } {
   const abortController = new AbortController();
@@ -158,7 +148,7 @@ export function streamChat(
 
   const promise = executeStream(
     conversationId,
-    messages,
+    prompt,
     callbacks,
     abortController.signal,
     chunks

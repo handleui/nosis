@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { streamChat, type ChatMessage } from "./streaming";
+import { streamChat } from "./streaming";
 
 declare global {
   interface Window {
     __muppet_invoke: typeof invoke;
     __muppet_streamChat: (
       conversationId: string,
-      messages: ChatMessage[]
+      prompt: string
     ) => ReturnType<typeof streamChat>;
   }
 }
@@ -34,7 +34,7 @@ const DEV_COMMANDS: Record<string, string[]> = {
     '__muppet_invoke("has_exa_api_key")',
   ],
   "Streaming (Letta)": [
-    'const { promise, cancel } = __muppet_streamChat("conv-id", [{ role: "user", content: "Hello" }])',
+    'const { promise, cancel } = __muppet_streamChat("conv-id", "Hello")',
     "// call cancel() to abort",
   ],
 };
@@ -51,11 +51,8 @@ function printDevHelp() {
 
 function exposeDevGlobals() {
   window.__muppet_invoke = invoke;
-  window.__muppet_streamChat = (
-    conversationId: string,
-    messages: ChatMessage[]
-  ) =>
-    streamChat(conversationId, messages, {
+  window.__muppet_streamChat = (conversationId: string, prompt: string) =>
+    streamChat(conversationId, prompt, {
       onToken: (t) => console.log("[token]", t),
       onDone: (full) => console.log("\n[done]", full.length, "chars"),
       onError: (msg) => console.error("[error]", msg),

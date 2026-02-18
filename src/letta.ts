@@ -42,10 +42,16 @@ export async function createAgentForConversation(
     ],
   });
 
-  await invoke("set_conversation_agent_id", {
-    conversationId,
-    agentId: agent.id,
-  });
+  try {
+    await invoke("set_conversation_agent_id", {
+      conversationId,
+      agentId: agent.id,
+    });
+  } catch (err) {
+    // Best-effort cleanup to avoid orphaned remote agents
+    await provider.client.agents.delete(agent.id).catch(() => {});
+    throw err;
+  }
 
   return agent.id;
 }
