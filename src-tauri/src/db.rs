@@ -35,6 +35,48 @@ fn versioned_migrations() -> Vec<(i64, Vec<&'static str>)> {
         (3, vec![
             "ALTER TABLE conversations ADD COLUMN letta_agent_id TEXT",
         ]),
+        (4, vec![
+            "CREATE TABLE IF NOT EXISTS generations (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT,
+                model TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                image_url TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                seed INTEGER,
+                inference_time_ms REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_generations_created ON generations(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_generations_conv ON generations(conversation_id)",
+        ]),
+        (5, vec![
+            "DROP INDEX IF EXISTS idx_generations_conv",
+            "CREATE INDEX IF NOT EXISTS idx_generations_conv_created ON generations(conversation_id, created_at)",
+        ]),
+        // Store seed as TEXT to preserve full u64 range from fal.ai.
+        (6, vec![
+            "ALTER TABLE generations RENAME TO generations_old",
+            "CREATE TABLE generations (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT,
+                model TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                image_url TEXT NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                seed TEXT,
+                inference_time_ms REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+            )",
+            "INSERT INTO generations SELECT id, conversation_id, model, prompt, image_url, width, height, CAST(seed AS TEXT), inference_time_ms, created_at FROM generations_old",
+            "DROP TABLE generations_old",
+            "CREATE INDEX IF NOT EXISTS idx_generations_created ON generations(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_generations_conv_created ON generations(conversation_id, created_at)",
+        ]),
     ]
 }
 

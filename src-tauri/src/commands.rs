@@ -3,15 +3,15 @@ use std::sync::{Arc, Mutex, RwLock};
 use crate::arcade::{self, ArcadeClient};
 use crate::error::AppError;
 use crate::exa::{self, ContentOptions, SearchCategory};
+use crate::fal;
 use crate::placement::{self, PlacementMode, PlacementState};
-use crate::vault::ApiKeyVault;
+use crate::secrets::SecretStore;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
-use tracing::{error, info, instrument};
-use zeroize::Zeroize;
+use tracing::{error, info, instrument, warn};
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Conversation {
@@ -34,32 +34,37 @@ pub struct Message {
     pub created_at: String,
 }
 
-/// Tracks whether an Exa API key exists in the vault without holding the raw secret.
-pub struct ExaKeyPresent(pub Mutex<bool>);
-
+pub struct ExaKeyCache(pub RwLock<Option<String>>);
+pub struct FalKeyCache(pub RwLock<Option<String>>);
 pub struct SearchRateLimiter(pub Mutex<Option<std::time::Instant>>);
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Generation {
+    pub id: String,
+    pub conversation_id: Option<String>,
+    pub model: String,
+    pub prompt: String,
+    pub image_url: String,
+    pub width: i64,
+    pub height: i64,
+    pub seed: Option<String>,
+    pub inference_time_ms: Option<f64>,
+    pub created_at: String,
+}
 
 const MAX_TITLE_LENGTH: usize = 500;
 const MAX_CONTENT_LENGTH: usize = 100_000;
 const MAX_MODEL_LENGTH: usize = 100;
-const MAX_EXA_API_KEY_LENGTH: usize = 256;
+const MAX_API_KEY_LENGTH: usize = 500;
 const MAX_SETTING_KEY_LENGTH: usize = 255;
 const MAX_SETTING_VALUE_LENGTH: usize = 10_000;
 const MAX_PROVIDER_LENGTH: usize = 50;
-const MAX_API_KEY_LENGTH: usize = 500;
-const VAULT_CLIENT_NAME: &[u8] = b"api-keys";
-const EXA_VAULT_PROVIDER: &str = "exa";
 const DEFAULT_PAGE_SIZE: i32 = 100;
-
 const MAX_AGENT_ID_LENGTH: usize = 200;
 const MAX_ARCADE_API_KEY_LENGTH: usize = 256;
 const MAX_ARCADE_BASE_URL_LENGTH: usize = 500;
 const MAX_ARCADE_TOOLKIT_LENGTH: usize = 200;
 const MAX_ARCADE_INPUT_BYTES: usize = 1_000_000;
-
-fn validate_agent_id(agent_id: &str) -> Result<(), AppError> {
-    validate_identifier(agent_id, MAX_AGENT_ID_LENGTH, "Agent ID", &['-', '_', '.', ':'])
-}
 
 fn gen_id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -68,6 +73,10 @@ fn gen_id() -> String {
 fn validate_uuid(id: &str) -> Result<(), AppError> {
     uuid::Uuid::parse_str(id).map_err(|_| AppError::InvalidId)?;
     Ok(())
+}
+
+fn validate_api_key(key: &str) -> Result<(), AppError> {
+    validate_non_empty_bounded(key, MAX_API_KEY_LENGTH, "API key")
 }
 
 fn validate_title(title: &str) -> Result<(), AppError> {
@@ -86,15 +95,7 @@ fn validate_message_fields(
             "Invalid role: must be 'user', 'assistant', or 'system'".into(),
         ));
     }
-    if content.trim().is_empty() {
-        return Err(AppError::Validation("Content must not be empty".into()));
-    }
-    if content.len() > MAX_CONTENT_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Content exceeds maximum length of {} characters",
-            MAX_CONTENT_LENGTH
-        )));
-    }
+    validate_non_empty_bounded(content, MAX_CONTENT_LENGTH, "Content")?;
     if let Some(m) = model {
         if m.len() > MAX_MODEL_LENGTH {
             return Err(AppError::Validation(format!(
@@ -146,6 +147,10 @@ fn validate_non_empty_bounded(value: &str, max_len: usize, field: &str) -> Resul
     Ok(())
 }
 
+fn validate_agent_id(agent_id: &str) -> Result<(), AppError> {
+    validate_identifier(agent_id, MAX_AGENT_ID_LENGTH, "Agent ID", &['-', '_', '.', ':'])
+}
+
 fn validate_setting_key(key: &str) -> Result<(), AppError> {
     validate_identifier(key, MAX_SETTING_KEY_LENGTH, "Setting key", &['-', '_', '.'])
 }
@@ -154,13 +159,54 @@ fn validate_provider(provider: &str) -> Result<(), AppError> {
     validate_identifier(provider, MAX_PROVIDER_LENGTH, "Provider name", &['-', '_'])
 }
 
+fn read_cache<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockReadGuard<'_, T>, AppError> {
+    lock.read()
+        .map_err(|_| AppError::Internal("Failed to acquire cache lock".into()))
+}
+
+fn write_cache<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockWriteGuard<'_, T>, AppError> {
+    lock.write()
+        .map_err(|_| AppError::Internal("Failed to acquire cache lock".into()))
+}
+
+async fn blocking<F, T>(f: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> Result<T, AppError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?
+}
+
+/// Allowlist (not suffix match) to block attacker-controlled subdomains.
+const TRUSTED_FAL_HOSTS: &[&str] = &["fal.media", "v2.fal.media", "v3.fal.media"];
+
+fn is_trusted_fal_image_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    if parsed.port().is_some() {
+        return false;
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    TRUSTED_FAL_HOSTS.contains(&host)
+}
+
 /// Validate that a base URL uses HTTPS (or HTTP for localhost dev) and has a valid host.
 /// Prevents SSRF via file://, ftp://, or requests to internal network addresses.
 pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
     let parsed = url::Url::parse(url_str)
         .map_err(|_| AppError::Validation("Base URL is not a valid URL".into()))?;
 
-    // Reject URLs with embedded credentials (e.g., https://evil@internal-host/)
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(AppError::Validation(
             "Base URL must not contain credentials".into(),
@@ -181,7 +227,6 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
     match parsed.scheme() {
         "https" => {}
         "http" => {
-            // Allow http only for localhost development
             let host = parsed.host_str().unwrap_or("");
             if host != "localhost" {
                 return Err(AppError::Validation(
@@ -196,17 +241,14 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
         }
     }
 
-    // Block private/internal addresses to prevent SSRF.
-    // Use the url crate's parsed Host enum for robust IP range checking
-    // instead of fragile string-prefix matching.
     match parsed.host() {
         Some(url::Host::Ipv4(ip)) => {
-            if ip.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                || ip.is_loopback()    // 127.0.0.0/8
-                || ip.is_unspecified() // 0.0.0.0
-                || ip.is_link_local()  // 169.254.0.0/16 (covers AWS metadata endpoint)
-                || ip.is_broadcast()   // 255.255.255.255
-                || ip.is_multicast()   // 224.0.0.0/4
+            if ip.is_private()
+                || ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_multicast()
             {
                 return Err(AppError::Validation(
                     "Base URL must not point to a private or internal address".into(),
@@ -214,8 +256,6 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
             }
         }
         Some(url::Host::Ipv6(ip)) => {
-            // IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) bypass native IPv6
-            // checks like is_loopback(), so extract and check the inner IPv4 address.
             if let Some(v4) = ip.to_ipv4_mapped() {
                 if v4.is_private()
                     || v4.is_loopback()
@@ -229,12 +269,10 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
                     ));
                 }
             }
-            if ip.is_loopback()       // ::1
-                || ip.is_unspecified() // ::
-                || ip.is_multicast()  // ff00::/8
-                // RFC 4193 unique local addresses (fc00::/7)
+            if ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00
-                // Link-local unicast (fe80::/10)
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
             {
                 return Err(AppError::Validation(
@@ -253,8 +291,6 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
                     "Base URL must not point to a private or internal address".into(),
                 ));
             }
-            // Note: "localhost" is also caught by the lower == "localhost" check above,
-            // ensuring it's blocked for both http and https.
         }
         None => {
             return Err(AppError::Validation("Base URL must have a valid host".into()));
@@ -270,43 +306,28 @@ fn get_pool(app: &AppHandle) -> Result<&SqlitePool, AppError> {
         .map(|state| state.inner())
 }
 
+fn get_secret_store(app: &AppHandle) -> Result<Arc<SecretStore>, AppError> {
+    app.try_state::<Arc<SecretStore>>()
+        .ok_or(AppError::SecretStore("secret store not initialized".into()))
+        .map(|state| Arc::clone(state.inner()))
+}
+
 fn get_http_client(app: &AppHandle) -> Result<&reqwest::Client, AppError> {
     app.try_state::<reqwest::Client>()
         .ok_or(AppError::Internal("HTTP client not initialized".into()))
         .map(|state| state.inner())
 }
 
-fn get_exa_key_flag(app: &AppHandle) -> Result<&ExaKeyPresent, AppError> {
-    app.try_state::<ExaKeyPresent>()
-        .ok_or(AppError::Internal("API key presence flag not initialized".into()))
+fn get_exa_key_cache(app: &AppHandle) -> Result<&ExaKeyCache, AppError> {
+    app.try_state::<ExaKeyCache>()
+        .ok_or(AppError::Internal("API key cache not initialized".into()))
         .map(|state| state.inner())
 }
 
-fn lock_exa_flag(
-    flag: &ExaKeyPresent,
-) -> Result<std::sync::MutexGuard<'_, bool>, AppError> {
-    flag
-        .0
-        .lock()
-        .map_err(|_| AppError::Internal("Failed to acquire API key flag lock".into()))
-}
-
-fn get_vault(app: &AppHandle) -> Result<&Mutex<ApiKeyVault>, AppError> {
-    app.try_state::<Mutex<ApiKeyVault>>()
-        .ok_or_else(|| AppError::Internal("API key vault not initialized".into()))
+fn get_fal_key_cache(app: &AppHandle) -> Result<&FalKeyCache, AppError> {
+    app.try_state::<FalKeyCache>()
+        .ok_or(AppError::Internal("API key cache not initialized".into()))
         .map(|state| state.inner())
-}
-
-fn lock_vault(
-    mutex: &Mutex<ApiKeyVault>,
-) -> Result<std::sync::MutexGuard<'_, ApiKeyVault>, AppError> {
-    match mutex.lock() {
-        Ok(guard) => Ok(guard),
-        Err(poisoned) => {
-            tracing::warn!("vault mutex was poisoned by a prior panic, recovering");
-            Ok(poisoned.into_inner())
-        }
-    }
 }
 
 // ── Conversation Commands ──
@@ -585,28 +606,27 @@ pub fn get_placement_mode(app: AppHandle) -> Result<PlacementMode, AppError> {
 #[tauri::command]
 #[instrument(skip(app, key))]
 pub async fn store_exa_api_key(app: AppHandle, key: String) -> Result<(), AppError> {
-    let key = zeroize::Zeroizing::new(key);
-    validate_non_empty_bounded(&key, MAX_EXA_API_KEY_LENGTH, "API key")?;
-
-    write_exa_vault_key(&app, b"api_key:exa", key.as_bytes().to_vec(), true, "store")?;
-
-    info!("stored exa API key in vault");
+    validate_api_key(&key)?;
+    let store = get_secret_store(&app)?;
+    let key_bytes = key.as_bytes().to_vec();
+    blocking(move || store.insert("exa_api_key", key_bytes)).await?;
+    *write_cache(&get_exa_key_cache(&app)?.0)? = Some(key);
+    info!("stored exa API key");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn has_exa_api_key(app: AppHandle) -> Result<bool, AppError> {
-    let flag = get_exa_key_flag(&app)?;
-    let guard = lock_exa_flag(flag)?;
-    Ok(*guard)
+    Ok(read_cache(&get_exa_key_cache(&app)?.0)?.is_some())
 }
 
 #[tauri::command]
 #[instrument(skip(app))]
 pub async fn delete_exa_api_key(app: AppHandle) -> Result<(), AppError> {
-    write_exa_vault_key(&app, b"api_key:exa", Vec::new(), false, "delete")?;
-
-    info!("deleted exa API key from vault");
+    let store = get_secret_store(&app)?;
+    blocking(move || store.remove("exa_api_key")).await?;
+    *write_cache(&get_exa_key_cache(&app)?.0)? = None;
+    info!("deleted exa API key");
     Ok(())
 }
 
@@ -647,96 +667,13 @@ pub async fn search_web(
         *last = Some(now);
     }
 
-    let mut api_key = read_vault_key(&app, b"api_key:exa")?;
-
-    let http = get_http_client(&app)?;
-    let exa = exa::ExaClient::new(http, &api_key);
-    let result = exa.search(&request).await;
-
-    api_key.zeroize();
-    result
-}
-
-// ── Vault Helpers ──
-
-fn get_vault_client(
-    vault: &ApiKeyVault,
-) -> Result<iota_stronghold::Client, AppError> {
-    vault
-        .stronghold
-        .get_client(VAULT_CLIENT_NAME)
-        .map_err(|e| {
-            error!(error = ?e, "failed to get stronghold client");
-            AppError::Internal("Vault operation failed".into())
-        })
-}
-
-fn commit_vault(vault: &ApiKeyVault) -> Result<(), AppError> {
-    let keyprovider =
-        iota_stronghold::KeyProvider::try_from(vault.vault_key.clone()).map_err(|e| {
-            error!(error = ?e, "failed to create key provider");
-            AppError::Internal("Vault operation failed".into())
-        })?;
-
-    vault
-        .stronghold
-        .commit_with_keyprovider(&vault.snapshot_path, &keyprovider)
-        .map_err(|e| {
-            error!(error = ?e, "failed to commit stronghold snapshot");
-            AppError::Internal("Failed to persist API key".into())
-        })
-}
-
-fn write_exa_vault_key(
-    app: &AppHandle,
-    store_key: &[u8],
-    value: Vec<u8>,
-    flag_value: bool,
-    op_name: &str,
-) -> Result<(), AppError> {
-    let vault_state = get_vault(app)?;
-    let vault = lock_vault(vault_state)?;
-    let client = get_vault_client(&vault)?;
-
-    client
-        .store()
-        .insert(store_key.to_vec(), value, None)
-        .map_err(|e| {
-            error!(error = ?e, "failed to {} key in stronghold store", op_name);
-            AppError::Internal(format!("Failed to {} API key", op_name))
-        })?;
-
-    commit_vault(&vault)?;
-
-    let flag = get_exa_key_flag(app)?;
-    let mut guard = lock_exa_flag(flag)?;
-    *guard = flag_value;
-
-    Ok(())
-}
-
-fn read_vault_key(app: &AppHandle, store_key: &[u8]) -> Result<String, AppError> {
-    let vault_state = get_vault(app)?;
-    let vault = lock_vault(vault_state)?;
-    let client = get_vault_client(&vault)?;
-
-    let data = client
-        .store()
-        .get(store_key)
-        .map_err(|e| {
-            error!(error = ?e, "failed to read key from stronghold store");
-            AppError::Internal("Failed to retrieve API key".into())
-        })?;
-
-    let key_bytes = data
-        .filter(|b| !b.is_empty())
+    let api_key = read_cache(&get_exa_key_cache(&app)?.0)?
+        .clone()
         .ok_or(AppError::ApiKeyNotConfigured)?;
 
-    String::from_utf8(key_bytes).map_err(|e| {
-        let mut bad = e.into_bytes();
-        bad.zeroize();
-        AppError::Internal("Corrupted API key data".into())
-    })
+    let http = get_http_client(&app)?;
+    let client = exa::ExaClient::new(http, &api_key);
+    client.search(&request).await
 }
 
 // ── Generic API Key Commands ──
@@ -748,33 +685,14 @@ pub async fn store_api_key(
     provider: String,
     api_key: String,
 ) -> Result<(), AppError> {
-    let api_key = zeroize::Zeroizing::new(api_key);
     validate_provider(&provider)?;
-    if provider == EXA_VAULT_PROVIDER {
-        return Err(AppError::Validation(
-            "Use store_exa_api_key for the Exa provider".into(),
-        ));
-    }
-    if api_key.is_empty() || api_key.len() > MAX_API_KEY_LENGTH {
-        return Err(AppError::Validation("Invalid API key".into()));
-    }
-
-    let vault_state = get_vault(&app)?;
-    let vault = lock_vault(vault_state)?;
-    let client = get_vault_client(&vault)?;
+    validate_api_key(&api_key)?;
 
     let store_key = format!("api_key:{}", provider);
+    let store = get_secret_store(&app)?;
     let key_bytes = api_key.as_bytes().to_vec();
+    blocking(move || store.insert(&store_key, key_bytes)).await?;
 
-    client
-        .store()
-        .insert(store_key.into_bytes(), key_bytes, None)
-        .map_err(|e| {
-            error!(error = ?e, "failed to insert into stronghold store");
-            AppError::Internal("Failed to store API key".into())
-        })?;
-
-    commit_vault(&vault)?;
     info!(provider = %provider, "stored API key");
     Ok(())
 }
@@ -787,30 +705,14 @@ pub async fn get_api_key(
 ) -> Result<Option<String>, AppError> {
     validate_provider(&provider)?;
 
-    let vault_state = get_vault(&app)?;
-    let vault = lock_vault(vault_state)?;
-    let client = get_vault_client(&vault)?;
-
+    let store = get_secret_store(&app)?;
     let store_key = format!("api_key:{}", provider);
-    let data = client
-        .store()
-        .get(store_key.as_bytes())
-        .map_err(|e| {
-            error!(error = ?e, "failed to read from stronghold store");
-            AppError::Internal("Failed to retrieve API key".into())
-        })?;
-
-    let Some(bytes) = data.filter(|b| !b.is_empty()) else {
-        return Ok(None);
-    };
-
-    let value = String::from_utf8(bytes).map_err(|e| {
-        let mut bad = e.into_bytes();
-        bad.zeroize();
-        AppError::Internal("Corrupted API key data".into())
-    })?;
-
-    Ok(Some(value))
+    let data = blocking(move || store.get(&store_key)).await?;
+    data.map(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|_| AppError::Internal("Corrupted API key data".into()))
+    })
+    .transpose()
 }
 
 #[tauri::command]
@@ -821,22 +723,10 @@ pub async fn has_api_key(
 ) -> Result<bool, AppError> {
     validate_provider(&provider)?;
 
-    let vault_state = get_vault(&app)?;
-    let vault = lock_vault(vault_state)?;
-    let client = get_vault_client(&vault)?;
-
+    let store = get_secret_store(&app)?;
     let store_key = format!("api_key:{}", provider);
-    match client.store().get(store_key.as_bytes()) {
-        Ok(Some(mut data)) => {
-            data.zeroize();
-            Ok(true)
-        }
-        Ok(None) => Ok(false),
-        Err(e) => {
-            error!(error = ?e, "failed to check stronghold store");
-            Err(AppError::Internal("Failed to check API key".into()))
-        }
-    }
+    let data = blocking(move || store.get(&store_key)).await?;
+    Ok(data.is_some())
 }
 
 #[tauri::command]
@@ -846,21 +736,101 @@ pub async fn delete_api_key(
     provider: String,
 ) -> Result<(), AppError> {
     validate_provider(&provider)?;
-    if provider == EXA_VAULT_PROVIDER {
-        return Err(AppError::Validation(
-            "Use delete_exa_api_key for the Exa provider".into(),
-        ));
+
+    let store = get_secret_store(&app)?;
+    let store_key = format!("api_key:{}", provider);
+    blocking(move || store.remove(&store_key)).await?;
+
+    info!(provider = %provider, "deleted API key");
+    Ok(())
+}
+
+// ── Fal.ai API Key Commands ──
+
+#[tauri::command]
+#[instrument(skip(app, key))]
+pub async fn store_fal_api_key(app: AppHandle, key: String) -> Result<(), AppError> {
+    validate_api_key(&key)?;
+    let store = get_secret_store(&app)?;
+    let key_bytes = key.as_bytes().to_vec();
+    blocking(move || store.insert("fal_api_key", key_bytes)).await?;
+    *write_cache(&get_fal_key_cache(&app)?.0)? = Some(key);
+    info!("stored fal API key");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn has_fal_api_key(app: AppHandle) -> Result<bool, AppError> {
+    Ok(read_cache(&get_fal_key_cache(&app)?.0)?.is_some())
+}
+
+#[tauri::command]
+#[instrument(skip(app))]
+pub async fn delete_fal_api_key(app: AppHandle) -> Result<(), AppError> {
+    let store = get_secret_store(&app)?;
+    blocking(move || store.remove("fal_api_key")).await?;
+    *write_cache(&get_fal_key_cache(&app)?.0)? = None;
+    info!("deleted fal API key");
+    Ok(())
+}
+
+// ── Image Generation Commands ──
+
+fn validate_image_urls(response: &fal::ImageGenerationResponse) -> Result<(), AppError> {
+    for image in &response.images {
+        if !is_trusted_fal_image_url(&image.url) {
+            warn!(
+                url_len = image.url.len(),
+                "fal.ai: rejecting image URL from untrusted domain"
+            );
+            return Err(AppError::Validation(
+                "Image generation returned an unexpected URL".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn persist_generations(
+    pool: &SqlitePool,
+    response: &fal::ImageGenerationResponse,
+    conversation_id: &Option<String>,
+    model: &fal::FalModel,
+    prompt: &str,
+) -> Result<(), AppError> {
+    if response.images.is_empty() {
+        return Ok(());
     }
 
-    let vault_state = get_vault(&app)?;
-    let vault = lock_vault(vault_state)?;
-    let client = get_vault_client(&vault)?;
+    let inference_time_ms = response
+        .timings
+        .as_ref()
+        .and_then(|t| t.inference)
+        .map(|secs| secs * 1000.0);
+    let seed = response.seed.map(|s| s.to_string());
+    let model_str = model.as_path();
 
-    let store_key = format!("api_key:{}", provider);
-    let _ = client.store().delete(store_key.as_bytes());
-    commit_vault(&vault)?;
+    let mut tx = pool.begin().await?;
 
-    info!(provider = %provider, "deleted API key from vault");
+    for image in &response.images {
+        sqlx::query(
+            "INSERT INTO generations (id, conversation_id, model, prompt, image_url, width, height, seed, inference_time_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(gen_id())
+        .bind(conversation_id)
+        .bind(model_str)
+        .bind(prompt)
+        .bind(&image.url)
+        .bind(i64::from(image.width))
+        .bind(i64::from(image.height))
+        .bind(seed.as_deref())
+        .bind(inference_time_ms)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -883,7 +853,7 @@ fn get_arcade_client(app: &AppHandle) -> Result<Arc<ArcadeClient>, AppError> {
 #[tauri::command]
 pub async fn arcade_set_config(
     app: AppHandle,
-    mut api_key: String,
+    api_key: String,
     user_id: String,
     base_url: Option<String>,
 ) -> Result<(), AppError> {
@@ -894,22 +864,14 @@ pub async fn arcade_set_config(
         validate_base_url(url)?;
     }
 
-    // Store API key in the encrypted vault (not plaintext settings)
-    {
-        let vault_state = get_vault(&app)?;
-        let vault = lock_vault(vault_state)?;
-        let client = get_vault_client(&vault)?;
-
-        let key_bytes = api_key.as_bytes().to_vec();
-        client
-            .store()
-            .insert(b"arcade_api_key".to_vec(), key_bytes, None)
-            .map_err(|e| {
-                error!(error = ?e, "failed to store arcade API key in vault");
-                AppError::Internal("Failed to store API key".into())
-            })?;
-        commit_vault(&vault)?;
-    }
+    // Store API key in the encrypted secret store
+    let store = get_secret_store(&app)?;
+    let key_bytes = api_key.as_bytes().to_vec();
+    blocking({
+        let store = Arc::clone(&store);
+        move || store.insert("arcade_api_key", key_bytes)
+    })
+    .await?;
 
     // Store non-secret config in settings
     let pool = get_pool(&app)?;
@@ -939,9 +901,7 @@ pub async fn arcade_set_config(
 
     tx.commit().await?;
 
-    let client_result = ArcadeClient::new(api_key.clone(), user_id, base_url);
-    api_key.zeroize();
-    let client = client_result?;
+    let client = ArcadeClient::new(api_key, user_id, base_url)?;
     let state = app.state::<RwLock<Option<Arc<ArcadeClient>>>>();
     let mut guard = state.write().map_err(|e| {
         error!(error = %e, "arcade RwLock poisoned");
@@ -960,19 +920,11 @@ pub struct ArcadeConfigStatus {
 
 #[tauri::command]
 pub async fn arcade_get_config(app: AppHandle) -> Result<ArcadeConfigStatus, AppError> {
-    // Check API key existence in the vault, zeroizing any loaded bytes
-    let has_key = {
-        let vault_state = get_vault(&app)?;
-        let vault = lock_vault(vault_state)?;
-        let client = get_vault_client(&vault)?;
-        match client.store().get(b"arcade_api_key") {
-            Ok(Some(mut data)) => {
-                data.zeroize();
-                true
-            }
-            _ => false,
-        }
-    };
+    let store = get_secret_store(&app)?;
+    let has_key = blocking(move || {
+        Ok(store.get("arcade_api_key")?.is_some())
+    })
+    .await?;
 
     let pool = get_pool(&app)?;
     let user_id: Option<String> =
@@ -988,16 +940,9 @@ pub async fn arcade_get_config(app: AppHandle) -> Result<ArcadeConfigStatus, App
 
 #[tauri::command]
 pub async fn arcade_delete_config(app: AppHandle) -> Result<(), AppError> {
-    // Remove API key from the encrypted vault
-    {
-        let vault_state = get_vault(&app)?;
-        let vault = lock_vault(vault_state)?;
-        let client = get_vault_client(&vault)?;
-        let _ = client.store().delete(b"arcade_api_key");
-        commit_vault(&vault)?;
-    }
+    let store = get_secret_store(&app)?;
+    blocking(move || store.remove("arcade_api_key")).await?;
 
-    // Remove non-secret config from settings
     let pool = get_pool(&app)?;
     sqlx::query("DELETE FROM settings WHERE key IN ('arcade_user_id', 'arcade_base_url')")
         .execute(pool)
@@ -1046,9 +991,6 @@ pub async fn arcade_authorize_tool(
 
     if status != "completed" {
         if let Some(ref url_str) = resp.url {
-            // Parse and validate the URL scheme to prevent opening javascript:, file:,
-            // data:, or custom scheme URLs from a potentially malicious API response.
-            // url::Url::parse normalizes the scheme to lowercase, so this is case-insensitive.
             if let Ok(parsed) = url::Url::parse(url_str) {
                 if parsed.scheme() == "https" || parsed.scheme() == "http" {
                     if let Err(e) = app.opener().open_url(url_str, None::<&str>) {
@@ -1073,7 +1015,6 @@ pub async fn arcade_check_auth_status(
     wait: Option<u32>,
 ) -> Result<AuthorizeResult, AppError> {
     validate_non_empty_bounded(&authorization_id, 256, "Authorization ID")?;
-    // Authorization IDs should only contain safe characters (alphanumeric, hyphens, underscores)
     if !authorization_id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -1084,7 +1025,6 @@ pub async fn arcade_check_auth_status(
     }
     let client = get_arcade_client(&app)?;
 
-    // Clamp the wait timeout to prevent excessively long server-side polling
     let resp = client
         .check_auth_status(&authorization_id, wait.map(|w| w.min(59)))
         .await?;
@@ -1115,6 +1055,81 @@ pub async fn arcade_execute_tool(
     }
     let client = get_arcade_client(&app)?;
     Ok(client.execute_tool(&tool_name, input).await?)
+}
+
+// ── Image Generation Commands ──
+
+#[tauri::command]
+#[instrument(skip(app))]
+pub async fn generate_image(
+    app: AppHandle,
+    prompt: String,
+    model: Option<fal::FalModel>,
+    image_size: Option<fal::ImageSizePreset>,
+    num_inference_steps: Option<u32>,
+    conversation_id: Option<String>,
+) -> Result<fal::ImageGenerationResponse, AppError> {
+    if let Some(ref cid) = conversation_id {
+        validate_uuid(cid)?;
+    }
+
+    let model = model.unwrap_or(fal::FalModel::FluxSchnell);
+    let request = fal::ImageGenerationRequest {
+        prompt,
+        image_size,
+        num_inference_steps,
+    };
+    fal::validate_generation_request(&request)?;
+
+    let api_key = read_cache(&get_fal_key_cache(&app)?.0)?
+        .clone()
+        .ok_or(AppError::ApiKeyNotConfigured)?;
+
+    let http = get_http_client(&app)?;
+    let response = fal::FalClient::new(http, &api_key)
+        .generate_image(&model, &request)
+        .await?;
+
+    validate_image_urls(&response)?;
+    persist_generations(get_pool(&app)?, &response, &conversation_id, &model, &request.prompt).await?;
+
+    Ok(response)
+}
+
+#[tauri::command]
+#[instrument(skip(app))]
+pub async fn list_generations(
+    app: AppHandle,
+    conversation_id: Option<String>,
+    limit: Option<i32>,
+    offset: Option<i32>,
+) -> Result<Vec<Generation>, AppError> {
+    if let Some(ref cid) = conversation_id {
+        validate_uuid(cid)?;
+    }
+
+    let pool = get_pool(&app)?;
+    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
+    let offset = offset.unwrap_or(0).max(0);
+
+    let (sql, filter_id) = match conversation_id {
+        Some(ref cid) => (
+            "SELECT id, conversation_id, model, prompt, image_url, width, height, seed, inference_time_ms, created_at
+             FROM generations WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            Some(cid.as_str()),
+        ),
+        None => (
+            "SELECT id, conversation_id, model, prompt, image_url, width, height, seed, inference_time_ms, created_at
+             FROM generations ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            None,
+        ),
+    };
+
+    let mut query = sqlx::query_as::<Sqlite, Generation>(sql);
+    if let Some(cid) = filter_id {
+        query = query.bind(cid);
+    }
+    Ok(query.bind(limit).bind(offset).fetch_all(pool).await?)
 }
 
 // ── Global Hotkey ──

@@ -3,92 +3,19 @@ mod commands;
 mod db;
 mod error;
 mod exa;
+mod fal;
 mod placement;
+mod secrets;
 mod util;
-mod vault;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
-use zeroize::{Zeroize, Zeroizing};
-
-fn open_new_salt_file(path: &std::path::Path) -> Result<std::fs::File, std::io::Error> {
-    use std::fs::OpenOptions;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-    }
-
-    #[cfg(not(unix))]
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-}
-
-fn write_new_salt(mut file: std::fs::File, path: &std::path::Path) -> [u8; 32] {
-    use std::io::Write;
-
-    let mut salt = [0u8; 32];
-    getrandom::getrandom(&mut salt).expect("failed to generate random salt");
-    file.write_all(&salt).expect("failed to write salt file");
-    file.sync_all().expect("failed to sync salt file to disk");
-    restrict_salt_permissions(path);
-    salt
-}
-
-#[cfg(not(unix))]
-fn restrict_salt_permissions(path: &std::path::Path) {
-    tracing::warn!("non-unix platform: salt file lacks owner-only permissions, setting read-only");
-    let mut perms = std::fs::metadata(path)
-        .expect("failed to read salt file metadata")
-        .permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(path, perms).expect("failed to set salt file read-only");
-}
-
-#[cfg(unix)]
-fn restrict_salt_permissions(_path: &std::path::Path) {}
-
-fn read_existing_salt(path: &std::path::Path) -> [u8; 32] {
-    let bytes = std::fs::read(path).expect("failed to read salt file");
-    assert!(
-        bytes.len() == 32,
-        "corrupted salt file: expected 32 bytes, got {}",
-        bytes.len()
-    );
-    let mut salt = [0u8; 32];
-    salt.copy_from_slice(&bytes);
-    salt
-}
-
-fn get_or_create_salt(path: &std::path::Path) -> [u8; 32] {
-    match open_new_salt_file(path) {
-        Ok(file) => write_new_salt(file, path),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_existing_salt(path),
-        Err(_) => panic!("failed to create salt file"),
-    }
-}
-
-fn argon2_config() -> argon2::Config<'static> {
-    argon2::Config {
-        mem_cost: 47_104, // 46 MiB
-        time_cost: 3,
-        lanes: 1,
-        variant: argon2::Variant::Argon2id,
-        version: argon2::Version::Version13,
-        ..Default::default()
-    }
-}
 
 fn ensure_app_data_dir(app_data_dir: &std::path::Path) {
     std::fs::create_dir_all(app_data_dir).expect("failed to create app data directory");
@@ -98,70 +25,6 @@ fn ensure_app_data_dir(app_data_dir: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(app_data_dir, std::fs::Permissions::from_mode(0o700))
             .expect("failed to set app data directory permissions");
-    }
-}
-
-fn init_stronghold_plugin(
-    app: &tauri::AppHandle,
-    salt: [u8; 32],
-) -> Result<(), Box<dyn std::error::Error>> {
-    app.plugin(
-        tauri_plugin_stronghold::Builder::new(move |password| {
-            argon2::hash_raw(password.as_bytes(), &salt, &argon2_config())
-                .expect("failed to hash password")
-        })
-        .build(),
-    )?;
-    Ok(())
-}
-
-fn derive_vault_key(salt: &[u8; 32]) -> zeroize::Zeroizing<Vec<u8>> {
-    zeroize::Zeroizing::new(
-        argon2::hash_raw(b"muppet-api-keys", salt, &argon2_config())
-            .expect("failed to derive vault key"),
-    )
-}
-
-fn load_snapshot_if_exists(
-    stronghold: &iota_stronghold::Stronghold,
-    snapshot_path: &iota_stronghold::SnapshotPath,
-    vault_key: &zeroize::Zeroizing<Vec<u8>>,
-) {
-    if !snapshot_path.exists() {
-        return;
-    }
-    let kp = iota_stronghold::KeyProvider::try_from(vault_key.clone())
-        .expect("failed to create key provider");
-    if let Err(e) = stronghold.load_snapshot(&kp, snapshot_path) {
-        tracing::warn!(error = ?e, "failed to load API key vault, starting fresh");
-    }
-}
-
-fn ensure_stronghold_client(stronghold: &iota_stronghold::Stronghold) {
-    if stronghold.get_client(b"api-keys").is_err()
-        && stronghold.load_client(b"api-keys").is_err()
-    {
-        stronghold
-            .create_client(b"api-keys")
-            .expect("failed to create stronghold client");
-    }
-}
-
-fn init_api_key_vault(app_data_dir: &std::path::Path, salt: &[u8; 32]) -> vault::ApiKeyVault {
-    let snapshot_path =
-        iota_stronghold::SnapshotPath::from_path(app_data_dir.join("api-keys.hold"));
-    let vault_key = derive_vault_key(salt);
-    let stronghold = iota_stronghold::Stronghold::default();
-
-    load_snapshot_if_exists(&stronghold, &snapshot_path, &vault_key);
-    ensure_stronghold_client(&stronghold);
-
-    tracing::info!("API key vault initialized");
-
-    vault::ApiKeyVault {
-        stronghold,
-        snapshot_path,
-        vault_key,
     }
 }
 
@@ -204,17 +67,33 @@ async fn init_db_pool(app_data_dir: &Path) -> Result<SqlitePool, Box<dyn std::er
     Ok(pool)
 }
 
-fn vault_has_key(vault: &vault::ApiKeyVault, key: &[u8]) -> bool {
-    let Ok(client) = vault.stronghold.get_client(b"api-keys") else {
-        return false;
-    };
-    let mut data = match client.store().get(key).ok().flatten() {
-        Some(d) => d,
-        None => return false,
-    };
-    let present = !data.is_empty();
-    data.zeroize();
-    present
+/// Read a UTF-8 string secret from the SecretStore, returning None on any error
+/// or if the key is absent. Used only at startup to warm the in-memory caches.
+fn load_secret_string(store: &secrets::SecretStore, key: &str) -> Option<String> {
+    store
+        .get(key)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+fn warn_legacy_vault(app_data_dir: &Path) {
+    let old_vault_path = app_data_dir.join("api-keys.hold");
+    if old_vault_path.exists() {
+        tracing::warn!(
+            "legacy vault file api-keys.hold detected — keys stored via the previous \
+             store_api_key command are not automatically migrated to the new secret store"
+        );
+    }
+}
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("muppet/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .expect("failed to build HTTP client")
 }
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -227,31 +106,39 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
 
-    app.manage(
-        reqwest::Client::builder()
-            .user_agent("muppet/0.1.0")
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build HTTP client"),
-    );
+    // Derive vault key and open encrypted secret store.
+    let salt_path = app_data_dir.join("salt.txt");
+    let vault_key = secrets::derive_vault_key(&salt_path);
+    let snap_path = secrets::snapshot_path(&app_data_dir);
+    let secret_store = secrets::SecretStore::open(&snap_path, vault_key)
+        .expect("failed to open secret store");
 
-    let salt = get_or_create_salt(&app_data_dir.join("salt.txt"));
-    init_stronghold_plugin(app.handle(), salt)?;
+    warn_legacy_vault(&app_data_dir);
 
-    let api_vault = init_api_key_vault(&app_data_dir, &salt);
+    // Load API keys from secret store into the in-memory caches.
+    let cached_exa_key = load_secret_string(&secret_store, "exa_api_key");
+    let cached_fal_key = load_secret_string(&secret_store, "fal_api_key");
 
-    let exa_key_present = vault_has_key(&api_vault, b"api_key:exa");
-    app.manage(commands::ExaKeyPresent(std::sync::Mutex::new(exa_key_present)));
-    app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
+    let secret_store = Arc::new(secret_store);
+    let http_client = build_http_client();
 
+    // Load Arcade client from secret store + settings.
     let arcade_client =
-        tauri::async_runtime::block_on(load_arcade_client(&pool, &api_vault));
+        tauri::async_runtime::block_on(load_arcade_client(&pool, &secret_store));
 
     app.manage(pool);
-    app.manage(std::sync::Mutex::new(api_vault));
+    app.manage(Arc::clone(&secret_store));
+    app.manage(http_client);
+    app.manage(commands::ExaKeyCache(std::sync::RwLock::new(cached_exa_key)));
+    app.manage(commands::FalKeyCache(std::sync::RwLock::new(cached_fal_key)));
+    app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
     app.manage(std::sync::RwLock::new(arcade_client));
 
+    // Register the Stronghold plugin (still needed for its JS API surface).
+    app.handle()
+        .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())?;
+
+    // Set up placement state.
     let placement_file = app_data_dir.join("placement.json");
     let initial_mode = placement::load_state(&placement_file);
     app.manage(placement::PlacementState {
@@ -272,18 +159,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn load_arcade_client(
     pool: &SqlitePool,
-    vault: &vault::ApiKeyVault,
-) -> Option<std::sync::Arc<arcade::ArcadeClient>> {
-    // Load API key from the encrypted vault
-    let api_key = {
-        let client = vault.stronghold.get_client(b"api-keys").ok()?;
-        let mut data = client.store().get(b"arcade_api_key").ok()??;
-        let key = String::from_utf8(data.clone()).ok().map(Zeroizing::new);
-        data.zeroize();
-        key
-    }?;
+    store: &secrets::SecretStore,
+) -> Option<Arc<arcade::ArcadeClient>> {
+    let api_key = load_secret_string(store, "arcade_api_key")?;
 
-    // Load non-secret config from settings
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT key, value FROM settings WHERE key IN ('arcade_user_id', 'arcade_base_url')",
     )
@@ -302,8 +181,6 @@ async fn load_arcade_client(
         }
     }
 
-    // Re-validate the stored base_url at startup to guard against DB corruption
-    // or URLs stored by an older version that lacked validation.
     if let Some(ref url) = base_url {
         if commands::validate_base_url(url).is_err() {
             eprintln!("Stored arcade_base_url failed validation, ignoring saved config");
@@ -312,9 +189,9 @@ async fn load_arcade_client(
     }
 
     user_id.and_then(|uid| {
-        arcade::ArcadeClient::new((*api_key).clone(), uid, base_url)
+        arcade::ArcadeClient::new(api_key, uid, base_url)
             .ok()
-            .map(std::sync::Arc::new)
+            .map(Arc::new)
     })
 }
 
@@ -336,16 +213,21 @@ pub fn run() {
             commands::delete_conversation,
             commands::update_conversation_title,
             commands::set_conversation_agent_id,
+            commands::get_setting,
+            commands::set_setting,
             commands::store_exa_api_key,
             commands::has_exa_api_key,
             commands::delete_exa_api_key,
             commands::search_web,
-            commands::get_setting,
-            commands::set_setting,
             commands::store_api_key,
             commands::get_api_key,
             commands::has_api_key,
             commands::delete_api_key,
+            commands::store_fal_api_key,
+            commands::has_fal_api_key,
+            commands::delete_fal_api_key,
+            commands::generate_image,
+            commands::list_generations,
             commands::set_placement_mode,
             commands::get_placement_mode,
             commands::dismiss_window,

@@ -56,6 +56,14 @@ const DEV_COMMANDS: Record<string, string[]> = {
     '__muppet_invoke("search_web", { query: "latest AI news", numResults: 5 })',
     '__muppet_invoke("has_exa_api_key")',
   ],
+  "Fal.ai image generation": [
+    '__muppet_invoke("store_fal_api_key", { key: "your-fal-key" })',
+    '__muppet_invoke("has_fal_api_key")',
+    '__muppet_invoke("delete_fal_api_key")',
+    '__muppet_invoke("generate_image", { prompt: "a cat in space" })',
+    '__muppet_invoke("generate_image", { prompt: "sunset", model: "fal-ai/flux/dev", imageSize: "landscape_16_9" })',
+    '__muppet_invoke("list_generations")',
+  ],
   "Streaming (Letta)": [
     'const { promise, cancel } = __muppet_streamChat("conv-id", "Hello")',
     "// call cancel() to abort",
