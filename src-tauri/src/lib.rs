@@ -2,7 +2,6 @@ mod commands;
 mod db;
 mod error;
 mod exa;
-mod supermemory;
 mod vault;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -12,61 +11,66 @@ use tauri::Manager;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 
-fn get_or_create_salt(path: &std::path::Path) -> [u8; 32] {
+fn open_new_salt_file(path: &std::path::Path) -> Result<std::fs::File, std::io::Error> {
     use std::fs::OpenOptions;
-    use std::io::Write;
 
     #[cfg(unix)]
-    let file = {
+    {
         use std::os::unix::fs::OpenOptionsExt;
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
-    };
+    }
 
-    // Windows: no owner-only restriction available via OpenOptions.
-    // The file is set to read-only after creation (see below).
     #[cfg(not(unix))]
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path);
+        .open(path)
+}
 
-    match file {
-        Ok(mut file) => {
-            let mut salt = [0u8; 32];
-            getrandom::getrandom(&mut salt).expect("failed to generate random salt");
-            file.write_all(&salt).expect("failed to write salt file");
-            file.sync_all().expect("failed to sync salt file to disk");
+fn write_new_salt(mut file: std::fs::File, path: &std::path::Path) -> [u8; 32] {
+    use std::io::Write;
 
-            #[cfg(not(unix))]
-            {
-                tracing::warn!(
-                    "non-unix platform: salt file lacks owner-only permissions, setting read-only"
-                );
-                let mut perms = std::fs::metadata(path)
-                    .expect("failed to read salt file metadata")
-                    .permissions();
-                perms.set_readonly(true);
-                std::fs::set_permissions(path, perms)
-                    .expect("failed to set salt file read-only");
-            }
+    let mut salt = [0u8; 32];
+    getrandom::getrandom(&mut salt).expect("failed to generate random salt");
+    file.write_all(&salt).expect("failed to write salt file");
+    file.sync_all().expect("failed to sync salt file to disk");
+    restrict_salt_permissions(path);
+    salt
+}
 
-            salt
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let bytes = std::fs::read(path).expect("failed to read salt file");
-            assert!(
-                bytes.len() == 32,
-                "corrupted salt file: expected 32 bytes, got {}",
-                bytes.len()
-            );
-            let mut salt = [0u8; 32];
-            salt.copy_from_slice(&bytes);
-            salt
-        }
+#[cfg(not(unix))]
+fn restrict_salt_permissions(path: &std::path::Path) {
+    tracing::warn!("non-unix platform: salt file lacks owner-only permissions, setting read-only");
+    let mut perms = std::fs::metadata(path)
+        .expect("failed to read salt file metadata")
+        .permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(path, perms).expect("failed to set salt file read-only");
+}
+
+#[cfg(unix)]
+fn restrict_salt_permissions(_path: &std::path::Path) {}
+
+fn read_existing_salt(path: &std::path::Path) -> [u8; 32] {
+    let bytes = std::fs::read(path).expect("failed to read salt file");
+    assert!(
+        bytes.len() == 32,
+        "corrupted salt file: expected 32 bytes, got {}",
+        bytes.len()
+    );
+    let mut salt = [0u8; 32];
+    salt.copy_from_slice(&bytes);
+    salt
+}
+
+fn get_or_create_salt(path: &std::path::Path) -> [u8; 32] {
+    match open_new_salt_file(path) {
+        Ok(file) => write_new_salt(file, path),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_existing_salt(path),
         Err(_) => panic!("failed to create salt file"),
     }
 }
@@ -107,25 +111,29 @@ fn init_stronghold_plugin(
     Ok(())
 }
 
-fn init_api_key_vault(app_data_dir: &std::path::Path, salt: &[u8; 32]) -> vault::ApiKeyVault {
-    let vault_path = app_data_dir.join("api-keys.hold");
-    let snapshot_path = iota_stronghold::SnapshotPath::from_path(&vault_path);
-
-    let vault_key = zeroize::Zeroizing::new(
+fn derive_vault_key(salt: &[u8; 32]) -> zeroize::Zeroizing<Vec<u8>> {
+    zeroize::Zeroizing::new(
         argon2::hash_raw(b"muppet-api-keys", salt, &argon2_config())
             .expect("failed to derive vault key"),
-    );
+    )
+}
 
-    let stronghold = iota_stronghold::Stronghold::default();
-
-    if snapshot_path.exists() {
-        let kp = iota_stronghold::KeyProvider::try_from(vault_key.clone())
-            .expect("failed to create key provider");
-        if let Err(e) = stronghold.load_snapshot(&kp, &snapshot_path) {
-            tracing::warn!(error = ?e, "failed to load API key vault, starting fresh");
-        }
+fn load_snapshot_if_exists(
+    stronghold: &iota_stronghold::Stronghold,
+    snapshot_path: &iota_stronghold::SnapshotPath,
+    vault_key: &zeroize::Zeroizing<Vec<u8>>,
+) {
+    if !snapshot_path.exists() {
+        return;
     }
+    let kp = iota_stronghold::KeyProvider::try_from(vault_key.clone())
+        .expect("failed to create key provider");
+    if let Err(e) = stronghold.load_snapshot(&kp, snapshot_path) {
+        tracing::warn!(error = ?e, "failed to load API key vault, starting fresh");
+    }
+}
 
+fn ensure_stronghold_client(stronghold: &iota_stronghold::Stronghold) {
     if stronghold.get_client(b"api-keys").is_err()
         && stronghold.load_client(b"api-keys").is_err()
     {
@@ -133,6 +141,16 @@ fn init_api_key_vault(app_data_dir: &std::path::Path, salt: &[u8; 32]) -> vault:
             .create_client(b"api-keys")
             .expect("failed to create stronghold client");
     }
+}
+
+fn init_api_key_vault(app_data_dir: &std::path::Path, salt: &[u8; 32]) -> vault::ApiKeyVault {
+    let snapshot_path =
+        iota_stronghold::SnapshotPath::from_path(app_data_dir.join("api-keys.hold"));
+    let vault_key = derive_vault_key(salt);
+    let stronghold = iota_stronghold::Stronghold::default();
+
+    load_snapshot_if_exists(&stronghold, &snapshot_path, &vault_key);
+    ensure_stronghold_client(&stronghold);
 
     tracing::info!("API key vault initialized");
 
@@ -190,6 +208,32 @@ async fn load_cached_exa_key(pool: &SqlitePool) -> Option<String> {
         .flatten()
 }
 
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let app_data_dir = app
+        .path()
+        .app_local_data_dir()
+        .expect("could not resolve app local data path");
+
+    ensure_app_data_dir(&app_data_dir);
+
+    let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
+    let cached_api_key = tauri::async_runtime::block_on(load_cached_exa_key(&pool));
+
+    app.manage(pool);
+    app.manage(reqwest::Client::new());
+    app.manage(commands::ExaKeyCache(std::sync::Mutex::new(cached_api_key)));
+
+    let salt = get_or_create_salt(&app_data_dir.join("salt.txt"));
+    init_stronghold_plugin(app.handle(), salt)?;
+
+    let api_vault = init_api_key_vault(&app_data_dir, &salt);
+    app.manage(std::sync::Mutex::new(api_vault));
+
+    commands::register_hotkey(app)?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -197,45 +241,16 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .setup(|app| {
-            let app_data_dir = app
-                .path()
-                .app_local_data_dir()
-                .expect("could not resolve app local data path");
-
-            ensure_app_data_dir(&app_data_dir);
-
-            let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
-            let cached_api_key = tauri::async_runtime::block_on(load_cached_exa_key(&pool));
-
-            app.manage(pool);
-            app.manage(reqwest::Client::new());
-            app.manage(commands::ExaKeyCache(std::sync::Mutex::new(cached_api_key)));
-
-            app.manage(
-                std::sync::RwLock::new(Option::<std::sync::Arc<supermemory::SupermemoryClient>>::None),
-            );
-
-            let salt = get_or_create_salt(&app_data_dir.join("salt.txt"));
-            init_stronghold_plugin(app.handle(), salt)?;
-
-            let api_vault = init_api_key_vault(&app_data_dir, &salt);
-            app.manage(std::sync::Mutex::new(api_vault));
-
-            commands::register_hotkey(app)?;
-
-            Ok(())
-        })
+        .setup(setup_app)
         .invoke_handler(tauri::generate_handler![
             commands::create_conversation,
+            commands::get_conversation,
             commands::list_conversations,
             commands::get_messages,
             commands::save_message,
             commands::delete_conversation,
             commands::update_conversation_title,
-            commands::set_supermemory_api_key,
-            commands::supermemory_add,
-            commands::supermemory_search,
+            commands::set_conversation_agent_id,
             commands::store_exa_api_key,
             commands::has_exa_api_key,
             commands::delete_exa_api_key,

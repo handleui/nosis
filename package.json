@@ -13,7 +13,7 @@
     "prepare": "lefthook install"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.44",
+    "@letta-ai/vercel-ai-sdk-provider": "^1.4.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-global-shortcut": "^2",
     "@tauri-apps/plugin-stronghold": "^2",

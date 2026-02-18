@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 use crate::error::AppError;
 
@@ -130,7 +131,7 @@ impl<'a> ExaClient<'a> {
         // Truncate body to avoid logging sensitive data the API might echo back.
         let body = response.text().await.unwrap_or_default();
         let safe_body: String = body.chars().take(200).collect();
-        eprintln!("Exa API error ({}): {}", status, safe_body);
+        error!(status = %status, body = %safe_body, "exa API error");
 
         match status.as_u16() {
             401 => AppError::ExaAuth,
@@ -141,7 +142,7 @@ impl<'a> ExaClient<'a> {
 
     async fn parse_response(response: reqwest::Response) -> Result<SearchResponse, AppError> {
         response.json::<SearchResponse>().await.map_err(|_| {
-            eprintln!("Exa: failed to deserialize search response");
+            error!("failed to deserialize exa search response");
             AppError::ExaRequest
         })
     }
@@ -150,13 +151,13 @@ impl<'a> ExaClient<'a> {
 /// Log transport-level errors without leaking connection details.
 fn log_transport_error(e: &reqwest::Error) {
     if e.is_timeout() {
-        eprintln!("Exa HTTP error: request timed out");
+        error!("exa HTTP error: request timed out");
     } else if e.is_connect() {
-        eprintln!("Exa HTTP error: connection failed");
+        error!("exa HTTP error: connection failed");
     } else {
-        eprintln!(
-            "Exa HTTP error: request failed (status: {})",
-            e.status().map_or("none".to_string(), |s| s.to_string())
+        error!(
+            status = %e.status().map_or("none".to_string(), |s| s.to_string()),
+            "exa HTTP error: request failed"
         );
     }
 }

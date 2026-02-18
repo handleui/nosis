@@ -22,8 +22,6 @@ fn versioned_migrations() -> Vec<(i64, Vec<&'static str>)> {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             )",
-            // Composite index covers the get_messages query (WHERE conversation_id = ? ORDER BY created_at)
-            // and also serves as an index on conversation_id alone (leftmost prefix).
             "CREATE INDEX IF NOT EXISTS idx_messages_conv_created ON messages(conversation_id, created_at)",
         ]),
         (2, vec![
@@ -34,10 +32,12 @@ fn versioned_migrations() -> Vec<(i64, Vec<&'static str>)> {
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )",
         ]),
+        (3, vec![
+            "ALTER TABLE conversations ADD COLUMN letta_agent_id TEXT",
+        ]),
     ]
 }
 
-/// Run all pending versioned migrations, each in its own transaction.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     ensure_schema_version_table(pool).await?;
 

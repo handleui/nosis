@@ -1,8 +1,7 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
 
 use crate::error::AppError;
 use crate::exa::{self, ContentOptions, SearchCategory};
-use crate::supermemory::{self, AddDocumentRequest, AddDocumentResponse, SupermemoryClient};
 use crate::vault::ApiKeyVault;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool};
@@ -11,12 +10,11 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tracing::{error, info, instrument};
 use zeroize::Zeroize;
 
-// ── Types ──
-
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Conversation {
     pub id: String,
     pub title: String,
+    pub letta_agent_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -33,11 +31,7 @@ pub struct Message {
     pub created_at: String,
 }
 
-// ── State ──
-
 pub struct ExaKeyCache(pub Mutex<Option<String>>);
-
-// ── Helpers ──
 
 const MAX_TITLE_LENGTH: usize = 500;
 const MAX_CONTENT_LENGTH: usize = 100_000;
@@ -50,10 +44,11 @@ const MAX_API_KEY_LENGTH: usize = 500;
 const VAULT_CLIENT_NAME: &[u8] = b"api-keys";
 const DEFAULT_PAGE_SIZE: i32 = 100;
 
-const MAX_SUPERMEMORY_CONTENT_LENGTH: usize = 1_000_000;
-const MAX_SUPERMEMORY_TAG_LENGTH: usize = 200;
-const MAX_SUPERMEMORY_QUERY_LENGTH: usize = 10_000;
-const MAX_SUPERMEMORY_API_KEY_LENGTH: usize = 256;
+const MAX_AGENT_ID_LENGTH: usize = 200;
+
+fn validate_agent_id(agent_id: &str) -> Result<(), AppError> {
+    validate_identifier(agent_id, MAX_AGENT_ID_LENGTH, "Agent ID", &['-', '_'])
+}
 
 fn gen_id() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -65,16 +60,7 @@ fn validate_uuid(id: &str) -> Result<(), AppError> {
 }
 
 fn validate_title(title: &str) -> Result<(), AppError> {
-    if title.trim().is_empty() {
-        return Err(AppError::Validation("Title must not be empty".into()));
-    }
-    if title.len() > MAX_TITLE_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Title exceeds maximum length of {} characters",
-            MAX_TITLE_LENGTH
-        )));
-    }
-    Ok(())
+    validate_non_empty_bounded(title, MAX_TITLE_LENGTH, "Title")
 }
 
 fn validate_message_fields(
@@ -115,66 +101,46 @@ fn validate_message_fields(
     Ok(())
 }
 
-fn validate_not_empty(value: &str, field: &str) -> Result<(), AppError> {
-    if value.trim().is_empty() {
-        return Err(AppError::Validation(format!("{field} must not be empty")));
-    }
-    Ok(())
-}
-
-fn validate_max_length(value: &str, max: usize, field: &str) -> Result<(), AppError> {
-    if value.len() > max {
+fn validate_identifier(
+    value: &str,
+    max_len: usize,
+    field: &str,
+    allowed_extra: &[char],
+) -> Result<(), AppError> {
+    if value.is_empty() || value.len() > max_len {
         return Err(AppError::Validation(format!(
-            "{field} exceeds maximum length of {max} characters"
+            "{field} must be 1-{max_len} characters"
+        )));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || allowed_extra.contains(&c))
+    {
+        return Err(AppError::Validation(format!(
+            "{field} contains invalid characters"
         )));
     }
     Ok(())
 }
 
-fn validate_optional_tag(tag: &Option<String>, max: usize) -> Result<(), AppError> {
-    if let Some(ref t) = tag {
-        validate_not_empty(t, "Container tag")?;
-        validate_max_length(t, max, "Container tag")?;
+fn validate_non_empty_bounded(value: &str, max_len: usize, field: &str) -> Result<(), AppError> {
+    if value.trim().is_empty() {
+        return Err(AppError::Validation(format!("{field} must not be empty")));
+    }
+    if value.len() > max_len {
+        return Err(AppError::Validation(format!(
+            "{field} exceeds maximum length of {max_len} characters"
+        )));
     }
     Ok(())
 }
 
 fn validate_setting_key(key: &str) -> Result<(), AppError> {
-    if key.is_empty() || key.len() > MAX_SETTING_KEY_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Setting key must be 1-{} characters",
-            MAX_SETTING_KEY_LENGTH
-        )));
-    }
-    if !key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return Err(AppError::Validation(
-            "Setting key may only contain alphanumeric characters, hyphens, underscores, and dots"
-                .into(),
-        ));
-    }
-    Ok(())
+    validate_identifier(key, MAX_SETTING_KEY_LENGTH, "Setting key", &['-', '_', '.'])
 }
 
 fn validate_provider(provider: &str) -> Result<(), AppError> {
-    if provider.is_empty() || provider.len() > MAX_PROVIDER_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Provider name must be 1-{} characters",
-            MAX_PROVIDER_LENGTH
-        )));
-    }
-    if !provider
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::Validation(
-            "Provider name may only contain alphanumeric characters, hyphens, and underscores"
-                .into(),
-        ));
-    }
-    Ok(())
+    validate_identifier(provider, MAX_PROVIDER_LENGTH, "Provider name", &['-', '_'])
 }
 
 fn get_pool(app: &AppHandle) -> Result<&SqlitePool, AppError> {
@@ -195,13 +161,21 @@ fn get_exa_key_cache(app: &AppHandle) -> Result<&ExaKeyCache, AppError> {
         .map(|state| state.inner())
 }
 
+fn lock_exa_cache(
+    cache: &ExaKeyCache,
+) -> Result<std::sync::MutexGuard<'_, Option<String>>, AppError> {
+    cache
+        .0
+        .lock()
+        .map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))
+}
+
 fn get_vault(app: &AppHandle) -> Result<&Mutex<ApiKeyVault>, AppError> {
     app.try_state::<Mutex<ApiKeyVault>>()
         .ok_or_else(|| AppError::Internal("API key vault not initialized".into()))
         .map(|state| state.inner())
 }
 
-/// Acquire the vault Mutex, recovering from poison if a prior command panicked.
 fn lock_vault(
     mutex: &Mutex<ApiKeyVault>,
 ) -> Result<std::sync::MutexGuard<'_, ApiKeyVault>, AppError> {
@@ -213,8 +187,6 @@ fn lock_vault(
         }
     }
 }
-
-// ── Conversation Commands ──
 
 #[tauri::command]
 pub async fn create_conversation(
@@ -231,7 +203,7 @@ pub async fn create_conversation(
 
     Ok(sqlx::query_as::<Sqlite, Conversation>(
         "INSERT INTO conversations (id, title) VALUES (?, ?)
-         RETURNING id, title, created_at, updated_at",
+         RETURNING id, title, letta_agent_id, created_at, updated_at",
     )
     .bind(&id)
     .bind(&title)
@@ -250,7 +222,7 @@ pub async fn list_conversations(
     let offset = offset.unwrap_or(0).max(0);
 
     Ok(sqlx::query_as::<Sqlite, Conversation>(
-        "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+        "SELECT id, title, letta_agent_id, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
     )
     .bind(limit)
     .bind(offset)
@@ -297,7 +269,22 @@ pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), AppEr
     Ok(())
 }
 
-// ── Message Commands ──
+#[tauri::command]
+pub async fn get_conversation(
+    app: AppHandle,
+    id: String,
+) -> Result<Conversation, AppError> {
+    validate_uuid(&id)?;
+    let pool = get_pool(&app)?;
+
+    sqlx::query_as::<Sqlite, Conversation>(
+        "SELECT id, title, letta_agent_id, created_at, updated_at FROM conversations WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound("Conversation"))
+}
 
 #[tauri::command]
 pub async fn get_messages(
@@ -366,8 +353,6 @@ pub async fn save_message(
     Ok(message)
 }
 
-// ── Settings Commands ──
-
 #[tauri::command]
 #[instrument(skip(app))]
 pub async fn get_setting(app: AppHandle, key: String) -> Result<Option<String>, AppError> {
@@ -404,100 +389,33 @@ pub async fn set_setting(app: AppHandle, key: String, value: String) -> Result<(
     Ok(())
 }
 
-// ── Supermemory Commands ──
-
-fn get_supermemory_client(app: &AppHandle) -> Result<Arc<SupermemoryClient>, AppError> {
-    let state = app
-        .try_state::<RwLock<Option<Arc<SupermemoryClient>>>>()
-        .ok_or(AppError::SupermemoryNotConfigured)?;
-    let guard = state.read().map_err(|e| {
-        eprintln!("Supermemory RwLock poisoned (read): {e}");
-        AppError::SupermemoryNotConfigured
-    })?;
-    guard
-        .as_ref()
-        .cloned()
-        .ok_or(AppError::SupermemoryNotConfigured)
-}
-
 #[tauri::command]
-pub async fn set_supermemory_api_key(
+pub async fn set_conversation_agent_id(
     app: AppHandle,
-    api_key: String,
+    conversation_id: String,
+    agent_id: String,
 ) -> Result<(), AppError> {
-    if api_key.trim().is_empty() {
-        return Err(AppError::Validation("API key must not be empty".into()));
-    }
-    if api_key.len() > MAX_SUPERMEMORY_API_KEY_LENGTH {
-        return Err(AppError::Validation("API key is too long".into()));
-    }
+    validate_uuid(&conversation_id)?;
+    validate_agent_id(&agent_id)?;
 
-    let client = SupermemoryClient::new(api_key)?;
-    let state = app.state::<RwLock<Option<Arc<SupermemoryClient>>>>();
-    let mut guard = state.write().map_err(|e| {
-        eprintln!("Supermemory RwLock poisoned (write): {e}");
-        AppError::SupermemoryNotConfigured
-    })?;
-    *guard = Some(Arc::new(client));
+    let pool = get_pool(&app)?;
+    let result = sqlx::query(
+        "UPDATE conversations SET letta_agent_id = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&agent_id)
+    .bind(&conversation_id)
+    .execute(pool)
+    .await?;
 
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Conversation"));
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn supermemory_add(
-    app: AppHandle,
-    content: String,
-    container_tag: Option<String>,
-) -> Result<AddDocumentResponse, AppError> {
-    validate_not_empty(&content, "Content")?;
-    validate_max_length(&content, MAX_SUPERMEMORY_CONTENT_LENGTH, "Content")?;
-    validate_optional_tag(&container_tag, MAX_SUPERMEMORY_TAG_LENGTH)?;
-
-    let client = get_supermemory_client(&app)?;
-    let req = AddDocumentRequest {
-        content,
-        custom_id: None,
-        container_tag,
-    };
-
-    Ok(client.add_document(&req).await?)
-}
-
-#[tauri::command]
-pub async fn supermemory_search(
-    app: AppHandle,
-    q: String,
-    container_tag: Option<String>,
-    limit: Option<u32>,
-) -> Result<supermemory::SearchResponse, AppError> {
-    validate_not_empty(&q, "Search query")?;
-    validate_max_length(&q, MAX_SUPERMEMORY_QUERY_LENGTH, "Search query")?;
-    validate_optional_tag(&container_tag, MAX_SUPERMEMORY_TAG_LENGTH)?;
-
-    let client = get_supermemory_client(&app)?;
-    let req = supermemory::SearchRequest {
-        q,
-        container_tag,
-        limit: limit.map(|l| l.clamp(1, 100)),
-        threshold: None,
-    };
-
-    Ok(client.search(&req).await?)
-}
-
-// ── Exa API Key Commands ──
-
-#[tauri::command]
 pub async fn store_exa_api_key(app: AppHandle, key: String) -> Result<(), AppError> {
-    if key.trim().is_empty() {
-        return Err(AppError::Validation("API key must not be empty".into()));
-    }
-    if key.len() > MAX_EXA_API_KEY_LENGTH {
-        return Err(AppError::Validation(format!(
-            "API key exceeds maximum length of {} characters",
-            MAX_EXA_API_KEY_LENGTH
-        )));
-    }
+    validate_non_empty_bounded(&key, MAX_EXA_API_KEY_LENGTH, "API key")?;
 
     let pool = get_pool(&app)?;
 
@@ -510,7 +428,7 @@ pub async fn store_exa_api_key(app: AppHandle, key: String) -> Result<(), AppErr
     .await?;
 
     let cache = get_exa_key_cache(&app)?;
-    let mut guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
+    let mut guard = lock_exa_cache(cache)?;
     *guard = Some(key);
 
     Ok(())
@@ -519,7 +437,7 @@ pub async fn store_exa_api_key(app: AppHandle, key: String) -> Result<(), AppErr
 #[tauri::command]
 pub async fn has_exa_api_key(app: AppHandle) -> Result<bool, AppError> {
     let cache = get_exa_key_cache(&app)?;
-    let guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
+    let guard = lock_exa_cache(cache)?;
     Ok(guard.is_some())
 }
 
@@ -532,13 +450,11 @@ pub async fn delete_exa_api_key(app: AppHandle) -> Result<(), AppError> {
         .await?;
 
     let cache = get_exa_key_cache(&app)?;
-    let mut guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
+    let mut guard = lock_exa_cache(cache)?;
     *guard = None;
 
     Ok(())
 }
-
-// ── Search Commands ──
 
 #[tauri::command]
 pub async fn search_web(
@@ -559,8 +475,8 @@ pub async fn search_web(
 
     let cache = get_exa_key_cache(&app)?;
     let api_key = {
-        let guard = cache.0.lock().map_err(|_| AppError::Validation("Failed to acquire API key cache lock".into()))?;
-        guard.clone().ok_or(AppError::ApiKeyNotConfigured)?
+        let guard = lock_exa_cache(cache)?;
+        guard.as_ref().ok_or(AppError::ApiKeyNotConfigured)?.clone()
     };
 
     let http = get_http_client(&app)?;
@@ -568,8 +484,6 @@ pub async fn search_web(
 
     client.search(&request).await
 }
-
-// ── Vault API Key Commands ──
 
 fn get_vault_client(
     vault: &ApiKeyVault,
@@ -604,36 +518,32 @@ fn commit_vault(vault: &ApiKeyVault) -> Result<(), AppError> {
 pub async fn store_api_key(
     app: AppHandle,
     provider: String,
-    mut api_key: String,
+    api_key: String,
 ) -> Result<(), AppError> {
-    let result = (|| -> Result<(), AppError> {
-        validate_provider(&provider)?;
-        if api_key.is_empty() || api_key.len() > MAX_API_KEY_LENGTH {
-            return Err(AppError::Validation("Invalid API key".into()));
-        }
+    let api_key = zeroize::Zeroizing::new(api_key);
+    validate_provider(&provider)?;
+    if api_key.is_empty() || api_key.len() > MAX_API_KEY_LENGTH {
+        return Err(AppError::Validation("Invalid API key".into()));
+    }
 
-        let vault_state = get_vault(&app)?;
-        let vault = lock_vault(vault_state)?;
-        let client = get_vault_client(&vault)?;
+    let vault_state = get_vault(&app)?;
+    let vault = lock_vault(vault_state)?;
+    let client = get_vault_client(&vault)?;
 
-        let store_key = format!("api_key:{}", provider);
-        let key_bytes = api_key.as_bytes().to_vec();
-        api_key.zeroize();
-        let insert_result = client
-            .store()
-            .insert(store_key.into_bytes(), key_bytes, None);
-        insert_result.map_err(|e| {
+    let store_key = format!("api_key:{}", provider);
+    let key_bytes = api_key.as_bytes().to_vec();
+
+    client
+        .store()
+        .insert(store_key.into_bytes(), key_bytes, None)
+        .map_err(|e| {
             error!(error = ?e, "failed to insert into stronghold store");
             AppError::Internal("Failed to store API key".into())
         })?;
 
-        commit_vault(&vault)?;
-
-        info!(provider = %provider, "stored API key");
-        Ok(())
-    })();
-
-    result
+    commit_vault(&vault)?;
+    info!(provider = %provider, "stored API key");
+    Ok(())
 }
 
 #[tauri::command]
@@ -649,22 +559,26 @@ pub async fn get_api_key(
     let client = get_vault_client(&vault)?;
 
     let store_key = format!("api_key:{}", provider);
-    match client.store().get(store_key.as_bytes()) {
-        Ok(Some(mut data)) => {
-            let value = String::from_utf8(data.clone())
-                .map_err(|_| AppError::Internal("Corrupted API key data".into()));
-            data.zeroize();
-            Ok(Some(value?))
-        }
-        Ok(None) => Ok(None),
-        Err(e) => {
+    let data = client
+        .store()
+        .get(store_key.as_bytes())
+        .map_err(|e| {
             error!(error = ?e, "failed to read from stronghold store");
-            Err(AppError::Internal("Failed to retrieve API key".into()))
-        }
-    }
-}
+            AppError::Internal("Failed to retrieve API key".into())
+        })?;
 
-// ── Global Hotkey ──
+    let Some(bytes) = data else {
+        return Ok(None);
+    };
+
+    let value = String::from_utf8(bytes).map_err(|e| {
+        let mut bad = e.into_bytes();
+        bad.zeroize();
+        AppError::Internal("Corrupted API key data".into())
+    })?;
+
+    Ok(Some(value))
+}
 
 pub fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.global_shortcut().on_shortcut(
