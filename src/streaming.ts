@@ -18,15 +18,24 @@ interface ConversationRecord {
   letta_agent_id: string | null;
 }
 
-let cachedProvider: { key: string; provider: LettaProvider } | null = null;
+let cachedProvider: { keyHash: string; provider: LettaProvider } | null = null;
 const agentIdCache = new Map<string, string>();
 
-function getOrCreateProvider(apiKey: string): LettaProvider {
-  if (cachedProvider?.key === apiKey) {
+async function hashKey(key: string): Promise<string> {
+  const data = new TextEncoder().encode(key);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function getOrCreateProvider(apiKey: string): Promise<LettaProvider> {
+  const hash = await hashKey(apiKey);
+  if (cachedProvider?.keyHash === hash) {
     return cachedProvider.provider;
   }
   const provider = createLettaProvider(apiKey);
-  cachedProvider = { key: apiKey, provider };
+  cachedProvider = { keyHash: hash, provider };
   return provider;
 }
 
@@ -95,7 +104,7 @@ async function executeStream(
   chunks: string[]
 ): Promise<void> {
   const apiKey = await getLettaApiKey();
-  const letta = getOrCreateProvider(apiKey);
+  const letta = await getOrCreateProvider(apiKey);
   const agentId = await resolveAgentId(conversationId, letta);
 
   const result = streamText({
