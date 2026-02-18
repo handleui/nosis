@@ -13,7 +13,7 @@ use std::path::Path;
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 fn open_new_salt_file(path: &std::path::Path) -> Result<std::fs::File, std::io::Error> {
     use std::fs::OpenOptions;
@@ -277,7 +277,7 @@ async fn load_arcade_client(
     let api_key = {
         let client = vault.stronghold.get_client(b"api-keys").ok()?;
         let mut data = client.store().get(b"arcade_api_key").ok()??;
-        let key = String::from_utf8(data.clone()).ok();
+        let key = String::from_utf8(data.clone()).ok().map(Zeroizing::new);
         data.zeroize();
         key
     }?;
@@ -311,7 +311,7 @@ async fn load_arcade_client(
     }
 
     user_id.and_then(|uid| {
-        arcade::ArcadeClient::new(api_key, uid, base_url)
+        arcade::ArcadeClient::new((*api_key).clone(), uid, base_url)
             .ok()
             .map(std::sync::Arc::new)
     })

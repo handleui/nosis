@@ -928,8 +928,9 @@ pub async fn arcade_set_config(
 
     tx.commit().await?;
 
-    let client = ArcadeClient::new(api_key.clone(), user_id, base_url)?;
+    let client_result = ArcadeClient::new(api_key.clone(), user_id, base_url);
     api_key.zeroize();
+    let client = client_result?;
     let state = app.state::<RwLock<Option<Arc<ArcadeClient>>>>();
     let mut guard = state.write().map_err(|e| {
         error!(error = %e, "arcade RwLock poisoned");
