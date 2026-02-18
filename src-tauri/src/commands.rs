@@ -242,7 +242,8 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
                     "Base URL must not point to a private or internal address".into(),
                 ));
             }
-            // "localhost" itself is handled above in the scheme check (allowed for http only)
+            // Note: "localhost" is also caught by the lower == "localhost" check above,
+            // ensuring it's blocked for both http and https.
         }
         None => {
             return Err(AppError::Validation("Base URL must have a valid host".into()));
@@ -871,7 +872,7 @@ fn get_arcade_client(app: &AppHandle) -> Result<Arc<ArcadeClient>, AppError> {
 #[tauri::command]
 pub async fn arcade_set_config(
     app: AppHandle,
-    api_key: String,
+    mut api_key: String,
     user_id: String,
     base_url: Option<String>,
 ) -> Result<(), AppError> {
@@ -882,16 +883,26 @@ pub async fn arcade_set_config(
         validate_base_url(url)?;
     }
 
+    // Store API key in the encrypted vault (not plaintext settings)
+    {
+        let vault_state = get_vault(&app)?;
+        let vault = lock_vault(vault_state)?;
+        let client = get_vault_client(&vault)?;
+
+        let key_bytes = api_key.as_bytes().to_vec();
+        client
+            .store()
+            .insert(b"arcade_api_key".to_vec(), key_bytes, None)
+            .map_err(|e| {
+                error!(error = ?e, "failed to store arcade API key in vault");
+                AppError::Internal("Failed to store API key".into())
+            })?;
+        commit_vault(&vault)?;
+    }
+
+    // Store non-secret config in settings
     let pool = get_pool(&app)?;
     let mut tx = pool.begin().await?;
-
-    sqlx::query(
-        "INSERT INTO settings (key, value) VALUES ('arcade_api_key', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-    )
-    .bind(&api_key)
-    .execute(&mut *tx)
-    .await?;
 
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('arcade_user_id', ?)
@@ -917,7 +928,8 @@ pub async fn arcade_set_config(
 
     tx.commit().await?;
 
-    let client = ArcadeClient::new(api_key, user_id, base_url)?;
+    let client = ArcadeClient::new(api_key.clone(), user_id, base_url)?;
+    api_key.zeroize();
     let state = app.state::<RwLock<Option<Arc<ArcadeClient>>>>();
     let mut guard = state.write().map_err(|e| {
         error!(error = %e, "arcade RwLock poisoned");
@@ -936,14 +948,15 @@ pub struct ArcadeConfigStatus {
 
 #[tauri::command]
 pub async fn arcade_get_config(app: AppHandle) -> Result<ArcadeConfigStatus, AppError> {
+    // Check API key existence in the vault without loading its value into memory
+    let has_key = {
+        let vault_state = get_vault(&app)?;
+        let vault = lock_vault(vault_state)?;
+        let client = get_vault_client(&vault)?;
+        matches!(client.store().get(b"arcade_api_key"), Ok(Some(_)))
+    };
+
     let pool = get_pool(&app)?;
-
-    // Check API key existence without loading its value into memory
-    let has_key: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'arcade_api_key')")
-            .fetch_one(pool)
-            .await?;
-
     let user_id: Option<String> =
         sqlx::query_scalar("SELECT value FROM settings WHERE key = 'arcade_user_id'")
             .fetch_optional(pool)
@@ -957,13 +970,20 @@ pub async fn arcade_get_config(app: AppHandle) -> Result<ArcadeConfigStatus, App
 
 #[tauri::command]
 pub async fn arcade_delete_config(app: AppHandle) -> Result<(), AppError> {
-    let pool = get_pool(&app)?;
+    // Remove API key from the encrypted vault
+    {
+        let vault_state = get_vault(&app)?;
+        let vault = lock_vault(vault_state)?;
+        let client = get_vault_client(&vault)?;
+        let _ = client.store().delete(b"arcade_api_key");
+        commit_vault(&vault)?;
+    }
 
-    sqlx::query(
-        "DELETE FROM settings WHERE key IN ('arcade_api_key', 'arcade_user_id', 'arcade_base_url')",
-    )
-    .execute(pool)
-    .await?;
+    // Remove non-secret config from settings
+    let pool = get_pool(&app)?;
+    sqlx::query("DELETE FROM settings WHERE key IN ('arcade_user_id', 'arcade_base_url')")
+        .execute(pool)
+        .await?;
 
     let state = app.state::<RwLock<Option<Arc<ArcadeClient>>>>();
     let mut guard = state.write().map_err(|e| {

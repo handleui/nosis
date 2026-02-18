@@ -13,6 +13,7 @@ use std::path::Path;
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
+use zeroize::Zeroize;
 
 fn open_new_salt_file(path: &std::path::Path) -> Result<std::fs::File, std::io::Error> {
     use std::fs::OpenOptions;
@@ -224,9 +225,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ensure_app_data_dir(&app_data_dir);
 
     let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
-    let arcade_client = tauri::async_runtime::block_on(load_arcade_client(&pool));
 
-    app.manage(pool);
     app.manage(
         reqwest::Client::builder()
             .user_agent("muppet/0.1.0")
@@ -245,6 +244,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(commands::ExaKeyPresent(std::sync::Mutex::new(exa_key_present)));
     app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
 
+    let arcade_client =
+        tauri::async_runtime::block_on(load_arcade_client(&pool, &api_vault));
+
+    app.manage(pool);
     app.manage(std::sync::Mutex::new(api_vault));
     app.manage(std::sync::RwLock::new(arcade_client));
 
@@ -268,21 +271,30 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn load_arcade_client(
     pool: &SqlitePool,
+    vault: &vault::ApiKeyVault,
 ) -> Option<std::sync::Arc<arcade::ArcadeClient>> {
+    // Load API key from the encrypted vault
+    let api_key = {
+        let client = vault.stronghold.get_client(b"api-keys").ok()?;
+        let mut data = client.store().get(b"arcade_api_key").ok()??;
+        let key = String::from_utf8(data.clone()).ok();
+        data.zeroize();
+        key
+    }?;
+
+    // Load non-secret config from settings
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM settings WHERE key IN ('arcade_api_key', 'arcade_user_id', 'arcade_base_url')",
+        "SELECT key, value FROM settings WHERE key IN ('arcade_user_id', 'arcade_base_url')",
     )
     .fetch_all(pool)
     .await
     .ok()?;
 
-    let mut api_key = None;
     let mut user_id = None;
     let mut base_url = None;
 
     for (key, value) in rows {
         match key.as_str() {
-            "arcade_api_key" => api_key = Some(value),
             "arcade_user_id" => user_id = Some(value),
             "arcade_base_url" => base_url = Some(value),
             _ => {}
@@ -298,12 +310,11 @@ async fn load_arcade_client(
         }
     }
 
-    match (api_key, user_id) {
-        (Some(key), Some(uid)) => arcade::ArcadeClient::new(key, uid, base_url)
+    user_id.and_then(|uid| {
+        arcade::ArcadeClient::new(api_key, uid, base_url)
             .ok()
-            .map(std::sync::Arc::new),
-        _ => None,
-    }
+            .map(std::sync::Arc::new)
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

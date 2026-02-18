@@ -209,6 +209,7 @@ impl ArcadeClient {
             .user_agent("muppet/0.1.0")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(ArcadeError::HttpClient)?;
 
