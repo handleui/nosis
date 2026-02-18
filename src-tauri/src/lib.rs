@@ -12,6 +12,7 @@ use std::path::Path;
 use tauri::Manager;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
+use zeroize::Zeroize;
 
 fn get_or_create_salt(path: &std::path::Path) -> [u8; 32] {
     use std::fs::OpenOptions;
@@ -112,6 +113,10 @@ fn init_api_key_vault(app_data_dir: &std::path::Path, salt: &[u8; 32]) -> vault:
     let vault_path = app_data_dir.join("api-keys.hold");
     let snapshot_path = iota_stronghold::SnapshotPath::from_path(&vault_path);
 
+    // SECURITY: The hardcoded password means encryption-at-rest relies solely on filesystem
+    // permissions (salt file + .hold file), NOT on a user-supplied secret. An attacker with read
+    // access to the app data directory can derive the same key and decrypt the vault offline.
+    // For stronger protection, gate the root secret behind macOS Keychain / biometrics.
     let vault_key = zeroize::Zeroizing::new(
         argon2::hash_raw(b"muppet-api-keys", salt, &argon2_config())
             .expect("failed to derive vault key"),
@@ -188,7 +193,13 @@ fn load_cached_exa_key_from_vault(vault: &vault::ApiKeyVault) -> Option<String> 
     let client = vault.stronghold.get_client(b"api-keys").ok()?;
     let store_key = b"api_key:exa";
     match client.store().get(store_key) {
-        Ok(Some(data)) => String::from_utf8(data).ok(),
+        Ok(Some(data)) => match String::from_utf8(data) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                e.into_bytes().zeroize();
+                None
+            }
+        },
         _ => None,
     }
 }
@@ -230,6 +241,7 @@ pub fn run() {
             let api_vault = init_api_key_vault(&app_data_dir, &salt);
             let cached_exa_key = load_cached_exa_key_from_vault(&api_vault);
             app.manage(commands::ExaKeyCache(std::sync::Mutex::new(cached_exa_key)));
+            app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
             app.manage(std::sync::Mutex::new(api_vault));
 
             let placement_file = app_data_dir.join("placement.json");

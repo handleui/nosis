@@ -39,6 +39,8 @@ pub struct Message {
 
 pub struct ExaKeyCache(pub Mutex<Option<String>>);
 
+pub struct SearchRateLimiter(pub Mutex<Option<std::time::Instant>>);
+
 // ── Helpers ──
 
 const MAX_TITLE_LENGTH: usize = 500;
@@ -534,14 +536,16 @@ pub async fn store_exa_api_key(app: AppHandle, mut key: String) -> Result<(), Ap
         )));
     }
 
+    // Convert to bytes immediately so key data is Zeroizing-protected
+    // even if vault access fails below.
+    let mut key_bytes = zeroize::Zeroizing::new(key.into_bytes());
+
     // Store in vault (encrypted) instead of plaintext settings table
     let vault_state = get_vault(&app)?;
     let vault = lock_vault(vault_state)?;
     let client = get_vault_client(&vault)?;
 
     let store_key = format!("api_key:{}", EXA_VAULT_PROVIDER);
-    let key_bytes = zeroize::Zeroizing::new(key.as_bytes().to_vec());
-    key.zeroize();
     client
         .store()
         .insert(store_key.into_bytes(), key_bytes.to_vec(), None)
@@ -559,7 +563,7 @@ pub async fn store_exa_api_key(app: AppHandle, mut key: String) -> Result<(), Ap
     if let Some(ref mut old_key) = *guard {
         old_key.zeroize();
     }
-    *guard = Some(String::from_utf8(key_bytes.to_vec()).expect("key_bytes originated from a valid UTF-8 String"));
+    *guard = Some(String::from_utf8(std::mem::take(&mut *key_bytes)).expect("key_bytes originated from a valid UTF-8 String"));
 
     info!("stored Exa API key in vault");
     Ok(())
@@ -620,6 +624,24 @@ pub async fn search_web(
     };
 
     exa::validate_search_request(&request)?;
+
+    // Rate-limit to prevent abuse (e.g. via XSS) that could exhaust API credits.
+    {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        let limiter = app
+            .try_state::<SearchRateLimiter>()
+            .ok_or(AppError::Internal("Rate limiter not initialized".into()))?;
+        let mut last = limiter.0.lock().map_err(|_| {
+            AppError::Internal("Failed to acquire rate limiter lock".into())
+        })?;
+        let now = std::time::Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < MIN_INTERVAL {
+                return Err(AppError::RateLimited);
+            }
+        }
+        *last = Some(now);
+    }
 
     let cache = get_exa_key_cache(&app)?;
     let mut api_key = {
@@ -684,16 +706,18 @@ pub async fn store_api_key(
         return Err(AppError::Validation("Invalid API key".into()));
     }
 
+    // Convert to bytes immediately so key data is Zeroizing-protected
+    // even if vault access fails below.
+    let mut key_bytes = zeroize::Zeroizing::new(api_key.into_bytes());
+
     let vault_state = get_vault(&app)?;
     let vault = lock_vault(vault_state)?;
     let client = get_vault_client(&vault)?;
 
     let store_key = format!("api_key:{}", provider);
-    let key_bytes = zeroize::Zeroizing::new(api_key.as_bytes().to_vec());
-    api_key.zeroize();
     client
         .store()
-        .insert(store_key.into_bytes(), key_bytes.to_vec(), None)
+        .insert(store_key.into_bytes(), std::mem::take(&mut *key_bytes), None)
         .map_err(|e| {
             error!(error = ?e, "failed to insert into stronghold store");
             AppError::Internal("Failed to store API key".into())
@@ -752,7 +776,10 @@ pub async fn has_api_key(
 
     let store_key = format!("api_key:{}", provider);
     match client.store().get(store_key.as_bytes()) {
-        Ok(Some(_)) => Ok(true),
+        Ok(Some(mut data)) => {
+            data.zeroize();
+            Ok(true)
+        }
         Ok(None) => Ok(false),
         Err(e) => {
             error!(error = ?e, "failed to check stronghold store");

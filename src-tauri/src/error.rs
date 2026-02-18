@@ -43,6 +43,9 @@ pub enum AppError {
     #[error("Rate limit exceeded, please try again later")]
     ExaRateLimit,
 
+    #[error("Too many requests, please wait before searching again")]
+    RateLimited,
+
     #[error("Window placement failed")]
     Placement(String),
 }
