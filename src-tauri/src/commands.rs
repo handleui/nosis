@@ -167,6 +167,17 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
         ));
     }
 
+    if parsed.fragment().is_some() {
+        return Err(AppError::Validation(
+            "Base URL must not contain a fragment (#)".into(),
+        ));
+    }
+    if parsed.query().is_some() {
+        return Err(AppError::Validation(
+            "Base URL must not contain query parameters".into(),
+        ));
+    }
+
     match parsed.scheme() {
         "https" => {}
         "http" => {
@@ -949,12 +960,18 @@ pub struct ArcadeConfigStatus {
 
 #[tauri::command]
 pub async fn arcade_get_config(app: AppHandle) -> Result<ArcadeConfigStatus, AppError> {
-    // Check API key existence in the vault without loading its value into memory
+    // Check API key existence in the vault, zeroizing any loaded bytes
     let has_key = {
         let vault_state = get_vault(&app)?;
         let vault = lock_vault(vault_state)?;
         let client = get_vault_client(&vault)?;
-        matches!(client.store().get(b"arcade_api_key"), Ok(Some(_)))
+        match client.store().get(b"arcade_api_key") {
+            Ok(Some(mut data)) => {
+                data.zeroize();
+                true
+            }
+            _ => false,
+        }
     };
 
     let pool = get_pool(&app)?;
