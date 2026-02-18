@@ -10,7 +10,6 @@ const CENTER_WIDTH: f64 = 720.0;
 const CENTER_HEIGHT: f64 = 560.0;
 const COMPACT_WIDTH: f64 = 400.0;
 const COMPACT_HEIGHT: f64 = 500.0;
-const MENU_BAR_HEIGHT: f64 = 25.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PlacementMode {
@@ -45,14 +44,16 @@ fn get_screen_geometry(window: &WebviewWindow) -> Result<ScreenGeometry, AppErro
         .ok_or_else(|| AppError::Placement("No monitor found".into()))?;
 
     let scale = monitor.scale_factor();
-    let size = monitor.size();
-    let pos = monitor.position();
+    // Use the work area rather than the full monitor size so that
+    // system chrome (macOS menu bar, Windows taskbar, etc.) is
+    // automatically excluded without any hardcoded per-platform offsets.
+    let work_area = monitor.work_area();
 
     Ok(ScreenGeometry {
-        x: pos.x as f64 / scale,
-        y: pos.y as f64 / scale,
-        width: size.width as f64 / scale,
-        height: size.height as f64 / scale,
+        x: work_area.position.x as f64 / scale,
+        y: work_area.position.y as f64 / scale,
+        width: work_area.size.width as f64 / scale,
+        height: work_area.size.height as f64 / scale,
     })
 }
 
@@ -99,11 +100,13 @@ pub fn apply_placement(window: &WebviewWindow, mode: PlacementMode) -> Result<()
             } else {
                 screen.x + screen.width - SIDEBAR_WIDTH
             };
-            let h = screen.height - MENU_BAR_HEIGHT;
+            // screen.x/y/width/height are already derived from the monitor's
+            // work area, so they exclude the menu bar / taskbar on every
+            // platform.  No additional offset is required.
             apply_window_props(
                 window, false, false, true,
-                LogicalSize::new(SIDEBAR_WIDTH, h),
-                LogicalPosition::new(x, screen.y + MENU_BAR_HEIGHT),
+                LogicalSize::new(SIDEBAR_WIDTH, screen.height),
+                LogicalPosition::new(x, screen.y),
             )
         }
     }

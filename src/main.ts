@@ -20,7 +20,7 @@ function setupEscapeDismiss() {
       return;
     }
 
-    invoke("dismiss_window");
+    invoke("dismiss_window").catch(() => undefined);
   });
 }
 

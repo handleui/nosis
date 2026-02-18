@@ -202,16 +202,29 @@ fn redact_api_keys(s: &str) -> std::borrow::Cow<'_, str> {
     }
 
     let mut result = s.to_string();
-    // Simple approach: replace any token-like sequence (20+ alphanumeric/dash/underscore chars)
-    // that appears after common key prefixes.
+    // Replace every token-like sequence (alphanumeric/dash/underscore chars) that appears
+    // after each known key prefix. Loop until no further occurrences remain so that multiple
+    // keys or repeated keys in the same string are all redacted.
     for prefix in PREFIXES {
-        if let Some(start) = result.find(prefix) {
-            let end = result[start..]
+        let mut search_start = 0;
+        while let Some(rel) = result[search_start..].find(prefix) {
+            let start = search_start + rel;
+            let after_prefix = start + prefix.len();
+            let end = result[after_prefix..]
                 .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-                .map(|i| start + i)
+                .map(|i| after_prefix + i)
                 .unwrap_or(result.len());
-            if end - start > 10 {
-                result.replace_range(start..end, "[REDACTED]");
+            if end - after_prefix > 10 {
+                // Replace only the key portion (after the prefix) so the prefix remains
+                // visible in logs, making it clear what kind of credential was redacted.
+                result.replace_range(after_prefix..end, "[REDACTED]");
+                // Advance past the prefix and the replacement text so the next iteration
+                // searches forward from here rather than re-examining the same prefix.
+                search_start = after_prefix + "[REDACTED]".len();
+            } else {
+                // Key portion is too short to be a real key; skip past this prefix
+                // occurrence so we don't loop forever on it.
+                search_start = after_prefix;
             }
         }
     }

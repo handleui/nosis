@@ -541,31 +541,35 @@ pub async fn store_exa_api_key(app: AppHandle, mut key: String) -> Result<(), Ap
 
     let store_key = format!("api_key:{}", EXA_VAULT_PROVIDER);
     let key_bytes = key.as_bytes().to_vec();
+    // key is no longer needed as a plaintext source; zeroize it now so it cannot
+    // linger in memory on any subsequent error path. The value has already been
+    // captured in key_bytes (passed to stronghold) and will be re-materialised
+    // below only to populate the in-memory cache on the success path.
+    key.zeroize();
     // Pass ownership of key_bytes to stronghold; no extra copy lingers in our stack.
     if let Err(e) = client
         .store()
-        .insert(store_key.into_bytes(), key_bytes, None)
+        .insert(store_key.into_bytes(), key_bytes.clone(), None)
         .map_err(|e| {
             error!(error = ?e, "failed to insert exa key into stronghold store");
             AppError::Internal("Failed to store API key".into())
         })
     {
-        key.zeroize();
         return Err(e);
     }
     commit_vault(&vault)?;
 
     let cache = get_exa_key_cache(&app)?;
     let mut guard = cache.0.lock().map_err(|_| {
-        key.zeroize();
         AppError::Internal("Failed to acquire API key cache lock".into())
     })?;
     // Zeroize the previous cached key before replacing it.
     if let Some(ref mut old_key) = *guard {
         old_key.zeroize();
     }
-    // Move the key into the cache instead of cloning — avoids an extra copy of sensitive data.
-    *guard = Some(key);
+    // Populate the cache from key_bytes (the original `key` string was zeroized earlier).
+    // SAFETY: key_bytes came directly from a valid UTF-8 String, so this cannot fail.
+    *guard = Some(String::from_utf8(key_bytes).map_err(|_| AppError::Internal("API key is not valid UTF-8".into()))?);
 
     info!("stored Exa API key in vault");
     Ok(())
