@@ -5,6 +5,7 @@
   "permissions": [
     "core:default",
     "global-shortcut:default",
-    "stronghold:default"
+    "stronghold:default",
+    "opener:default"
   ]
 }

@@ -38,6 +38,16 @@ pub enum AppError {
 
     #[error("Window placement failed")]
     Placement(String),
+
+    #[error("Arcade service unavailable")]
+    ArcadeNotConfigured,
+
+    #[allow(dead_code)]
+    #[error("Arcade request failed")]
+    ArcadeRequest,
+
+    #[error("Arcade service error")]
+    Arcade(#[from] crate::arcade::ArcadeError),
 }
 
 impl Serialize for AppError {
@@ -53,6 +63,10 @@ impl Serialize for AppError {
             }
             AppError::Placement(ref msg) => {
                 error!(msg = %msg, "placement error");
+                return serializer.serialize_str(&self.to_string());
+            }
+            AppError::Arcade(ref inner) => {
+                error!(error = ?inner, "arcade error");
                 return serializer.serialize_str(&self.to_string());
             }
             _ => return serializer.serialize_str(&self.to_string()),
