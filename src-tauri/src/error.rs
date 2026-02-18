@@ -32,6 +32,12 @@ pub enum AppError {
 
     #[error("Rate limit exceeded, please try again later")]
     ExaRateLimit,
+
+    #[error("Too many requests, please wait before searching again")]
+    RateLimited,
+
+    #[error("Window placement failed")]
+    Placement(String),
 }
 
 impl Serialize for AppError {
@@ -44,6 +50,10 @@ impl Serialize for AppError {
             AppError::Internal(ref msg) => {
                 error!(error = %msg, "internal error");
                 "An internal error occurred"
+            }
+            AppError::Placement(ref msg) => {
+                error!(msg = %msg, "placement error");
+                return serializer.serialize_str(&self.to_string());
             }
             _ => return serializer.serialize_str(&self.to_string()),
         };

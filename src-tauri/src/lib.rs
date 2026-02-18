@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod exa;
+mod placement;
 mod vault;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -223,7 +224,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
 
     app.manage(pool);
-    app.manage(reqwest::Client::new());
+    app.manage(
+        reqwest::Client::builder()
+            .user_agent("muppet/0.1.0")
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client"),
+    );
 
     let salt = get_or_create_salt(&app_data_dir.join("salt.txt"));
     init_stronghold_plugin(app.handle(), salt)?;
@@ -232,10 +240,24 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let exa_key_present = vault_has_key(&api_vault, b"api_key:exa");
     app.manage(commands::ExaKeyPresent(std::sync::Mutex::new(exa_key_present)));
+    app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
 
     app.manage(std::sync::Mutex::new(api_vault));
 
+    let placement_file = app_data_dir.join("placement.json");
+    let initial_mode = placement::load_state(&placement_file);
+    app.manage(placement::PlacementState {
+        mode: std::sync::Mutex::new(initial_mode),
+        state_file: placement_file,
+    });
+
     commands::register_hotkey(app)?;
+
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(e) = placement::apply_placement(&window, initial_mode) {
+            tracing::warn!(error = %e, "startup placement failed — window may not be positioned correctly");
+        }
+    }
 
     Ok(())
 }
@@ -265,6 +287,11 @@ pub fn run() {
             commands::set_setting,
             commands::store_api_key,
             commands::get_api_key,
+            commands::has_api_key,
+            commands::delete_api_key,
+            commands::set_placement_mode,
+            commands::get_placement_mode,
+            commands::dismiss_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running muppet");

@@ -2,10 +2,11 @@ use std::sync::Mutex;
 
 use crate::error::AppError;
 use crate::exa::{self, ContentOptions, SearchCategory};
+use crate::placement::{self, PlacementMode, PlacementState};
 use crate::vault::ApiKeyVault;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tracing::{error, info, instrument};
 use zeroize::Zeroize;
@@ -34,6 +35,8 @@ pub struct Message {
 /// Tracks whether an Exa API key exists in the vault without holding the raw secret.
 pub struct ExaKeyPresent(pub Mutex<bool>);
 
+pub struct SearchRateLimiter(pub Mutex<Option<std::time::Instant>>);
+
 const MAX_TITLE_LENGTH: usize = 500;
 const MAX_CONTENT_LENGTH: usize = 100_000;
 const MAX_MODEL_LENGTH: usize = 100;
@@ -43,6 +46,7 @@ const MAX_SETTING_VALUE_LENGTH: usize = 10_000;
 const MAX_PROVIDER_LENGTH: usize = 50;
 const MAX_API_KEY_LENGTH: usize = 500;
 const VAULT_CLIENT_NAME: &[u8] = b"api-keys";
+const EXA_VAULT_PROVIDER: &str = "exa";
 const DEFAULT_PAGE_SIZE: i32 = 100;
 
 const MAX_AGENT_ID_LENGTH: usize = 200;
@@ -152,13 +156,13 @@ fn get_pool(app: &AppHandle) -> Result<&SqlitePool, AppError> {
 
 fn get_http_client(app: &AppHandle) -> Result<&reqwest::Client, AppError> {
     app.try_state::<reqwest::Client>()
-        .ok_or(AppError::Validation("HTTP client not initialized".into()))
+        .ok_or(AppError::Internal("HTTP client not initialized".into()))
         .map(|state| state.inner())
 }
 
 fn get_exa_key_flag(app: &AppHandle) -> Result<&ExaKeyPresent, AppError> {
     app.try_state::<ExaKeyPresent>()
-        .ok_or(AppError::Validation("API key presence flag not initialized".into()))
+        .ok_or(AppError::Internal("API key presence flag not initialized".into()))
         .map(|state| state.inner())
 }
 
@@ -168,7 +172,7 @@ fn lock_exa_flag(
     flag
         .0
         .lock()
-        .map_err(|_| AppError::Validation("Failed to acquire API key flag lock".into()))
+        .map_err(|_| AppError::Internal("Failed to acquire API key flag lock".into()))
 }
 
 fn get_vault(app: &AppHandle) -> Result<&Mutex<ApiKeyVault>, AppError> {
@@ -188,6 +192,8 @@ fn lock_vault(
         }
     }
 }
+
+// ── Conversation Commands ──
 
 #[tauri::command]
 pub async fn create_conversation(
@@ -287,6 +293,8 @@ pub async fn get_conversation(
     .ok_or(AppError::NotFound("Conversation"))
 }
 
+// ── Message Commands ──
+
 #[tauri::command]
 pub async fn get_messages(
     app: AppHandle,
@@ -354,6 +362,8 @@ pub async fn save_message(
     Ok(message)
 }
 
+// ── Settings Commands ──
+
 #[tauri::command]
 #[instrument(skip(app))]
 pub async fn get_setting(app: AppHandle, key: String) -> Result<Option<String>, AppError> {
@@ -367,7 +377,7 @@ pub async fn get_setting(app: AppHandle, key: String) -> Result<Option<String>, 
 }
 
 #[tauri::command]
-#[instrument(skip(app))]
+#[instrument(skip(app, value))]
 pub async fn set_setting(app: AppHandle, key: String, value: String) -> Result<(), AppError> {
     validate_setting_key(&key)?;
     if value.len() > MAX_SETTING_VALUE_LENGTH {
@@ -389,6 +399,8 @@ pub async fn set_setting(app: AppHandle, key: String, value: String) -> Result<(
 
     Ok(())
 }
+
+// ── Letta Agent Commands ──
 
 #[tauri::command]
 pub async fn set_conversation_agent_id(
@@ -413,6 +425,46 @@ pub async fn set_conversation_agent_id(
     }
     Ok(())
 }
+
+// ── Placement Commands ──
+
+#[tauri::command]
+pub fn set_placement_mode(app: AppHandle, mode: PlacementMode) -> Result<(), AppError> {
+    let state = app
+        .try_state::<PlacementState>()
+        .ok_or(AppError::Placement("Placement state not initialized".into()))?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or(AppError::Placement("Main window not found".into()))?;
+
+    placement::apply_placement(&window, mode)?;
+    {
+        let mut guard = state.mode.lock()
+            .map_err(|e| {
+                error!(error = %e, "placement state mutex poisoned");
+                AppError::Placement("Failed to update placement state".into())
+            })?;
+        *guard = mode;
+    }
+    placement::save_state(&state)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_placement_mode(app: AppHandle) -> Result<PlacementMode, AppError> {
+    let state = app
+        .try_state::<PlacementState>()
+        .ok_or(AppError::Placement("Placement state not initialized".into()))?;
+    let mode = state.mode.lock()
+        .map_err(|e| {
+            error!(error = %e, "placement state mutex poisoned");
+            AppError::Placement("Failed to read placement state".into())
+        })
+        .map(|guard| *guard)?;
+    Ok(mode)
+}
+
+// ── Exa API Key Commands ──
 
 #[tauri::command]
 #[instrument(skip(app, key))]
@@ -442,6 +494,8 @@ pub async fn delete_exa_api_key(app: AppHandle) -> Result<(), AppError> {
     Ok(())
 }
 
+// ── Search Commands ──
+
 #[tauri::command]
 pub async fn search_web(
     app: AppHandle,
@@ -459,6 +513,24 @@ pub async fn search_web(
 
     exa::validate_search_request(&request)?;
 
+    // Rate-limit to prevent abuse (e.g. via XSS) that could exhaust API credits.
+    {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        let limiter = app
+            .try_state::<SearchRateLimiter>()
+            .ok_or(AppError::Internal("Rate limiter not initialized".into()))?;
+        let mut last = limiter.0.lock().map_err(|_| {
+            AppError::Internal("Failed to acquire rate limiter lock".into())
+        })?;
+        let now = std::time::Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < MIN_INTERVAL {
+                return Err(AppError::RateLimited);
+            }
+        }
+        *last = Some(now);
+    }
+
     let mut api_key = read_vault_key(&app, b"api_key:exa")?;
 
     let http = get_http_client(&app)?;
@@ -468,6 +540,8 @@ pub async fn search_web(
     api_key.zeroize();
     result
 }
+
+// ── Vault Helpers ──
 
 fn get_vault_client(
     vault: &ApiKeyVault,
@@ -549,6 +623,8 @@ fn read_vault_key(app: &AppHandle, store_key: &[u8]) -> Result<String, AppError>
     })
 }
 
+// ── Generic API Key Commands ──
+
 #[tauri::command]
 #[instrument(skip(app, api_key))]
 pub async fn store_api_key(
@@ -558,6 +634,11 @@ pub async fn store_api_key(
 ) -> Result<(), AppError> {
     let api_key = zeroize::Zeroizing::new(api_key);
     validate_provider(&provider)?;
+    if provider == EXA_VAULT_PROVIDER {
+        return Err(AppError::Validation(
+            "Use store_exa_api_key for the Exa provider".into(),
+        ));
+    }
     if api_key.is_empty() || api_key.len() > MAX_API_KEY_LENGTH {
         return Err(AppError::Validation("Invalid API key".into()));
     }
@@ -616,23 +697,132 @@ pub async fn get_api_key(
     Ok(Some(value))
 }
 
+#[tauri::command]
+#[instrument(skip(app))]
+pub async fn has_api_key(
+    app: AppHandle,
+    provider: String,
+) -> Result<bool, AppError> {
+    validate_provider(&provider)?;
+
+    let vault_state = get_vault(&app)?;
+    let vault = lock_vault(vault_state)?;
+    let client = get_vault_client(&vault)?;
+
+    let store_key = format!("api_key:{}", provider);
+    match client.store().get(store_key.as_bytes()) {
+        Ok(Some(mut data)) => {
+            data.zeroize();
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(e) => {
+            error!(error = ?e, "failed to check stronghold store");
+            Err(AppError::Internal("Failed to check API key".into()))
+        }
+    }
+}
+
+#[tauri::command]
+#[instrument(skip(app))]
+pub async fn delete_api_key(
+    app: AppHandle,
+    provider: String,
+) -> Result<(), AppError> {
+    validate_provider(&provider)?;
+    if provider == EXA_VAULT_PROVIDER {
+        return Err(AppError::Validation(
+            "Use delete_exa_api_key for the Exa provider".into(),
+        ));
+    }
+
+    let vault_state = get_vault(&app)?;
+    let vault = lock_vault(vault_state)?;
+    let client = get_vault_client(&vault)?;
+
+    let store_key = format!("api_key:{}", provider);
+    let _ = client.store().delete(store_key.as_bytes());
+    commit_vault(&vault)?;
+
+    info!(provider = %provider, "deleted API key from vault");
+    Ok(())
+}
+
+// ── Global Hotkey ──
+
+fn get_main_window(app_handle: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app_handle.get_webview_window("main")
+}
+
+fn show_and_focus(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn summon(app_handle: &AppHandle) {
+    let Some(window) = get_main_window(app_handle) else { return };
+
+    let was_visible = window.is_visible().unwrap_or(false);
+    show_and_focus(&window);
+
+    if !was_visible {
+        reapply_current_placement(app_handle, &window);
+        let _ = window.emit("new_thread", ());
+    }
+}
+
+fn reapply_current_placement(app_handle: &AppHandle, window: &tauri::WebviewWindow) {
+    let Some(state) = app_handle.try_state::<PlacementState>() else { return };
+    let Ok(guard) = state.mode.lock() else { return };
+    let _ = placement::apply_placement(window, *guard);
+}
+
+fn dismiss(app_handle: &AppHandle) {
+    let Some(window) = get_main_window(app_handle) else { return };
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
+pub fn dismiss_window(app: AppHandle) {
+    dismiss(&app);
+}
+
+fn set_mode_if_visible(app_handle: &AppHandle, mode: PlacementMode) {
+    let Some(window) = get_main_window(app_handle) else { return };
+    if !window.is_visible().unwrap_or(false) { return };
+
+    let Some(state) = app_handle.try_state::<PlacementState>() else { return };
+    let Ok(mut guard) = state.mode.lock() else { return };
+    if *guard == mode { return; }
+
+    if let Err(e) = placement::apply_placement(&window, mode) {
+        error!(error = %e, "failed to apply placement");
+        return;
+    }
+    *guard = mode;
+    drop(guard);
+    placement::save_state_async(&state);
+}
+
+const PLACEMENT_HOTKEYS: &[(&str, PlacementMode)] = &[
+    ("Ctrl+Alt+ArrowLeft", PlacementMode::SidebarLeft),
+    ("Ctrl+Alt+ArrowRight", PlacementMode::SidebarRight),
+    ("Ctrl+Alt+ArrowUp", PlacementMode::Center),
+    ("Ctrl+Alt+ArrowDown", PlacementMode::Compact),
+];
+
 pub fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    app.global_shortcut().on_shortcut(
-        "Alt+Space",
-        move |app_handle, _shortcut, event| {
-            if event.state != ShortcutState::Pressed {
-                return;
-            }
-            let Some(window) = app_handle.get_webview_window("main") else {
-                return;
-            };
-            if window.is_visible().unwrap_or(false) {
-                let _ = window.hide();
-            } else {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        },
-    )?;
+    app.global_shortcut().on_shortcut("Alt+Space", move |h, _, e| {
+        if e.state == ShortcutState::Pressed { summon(h); }
+    })?;
+
+    for &(key, mode) in PLACEMENT_HOTKEYS {
+        app.global_shortcut().on_shortcut(key, move |h, _, e| {
+            if e.state == ShortcutState::Pressed { set_mode_if_visible(h, mode); }
+        })?;
+    }
+
     Ok(())
 }
