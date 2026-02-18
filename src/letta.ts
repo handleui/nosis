@@ -3,6 +3,7 @@ import {
   type LettaProvider,
 } from "@letta-ai/vercel-ai-sdk-provider";
 import { invoke } from "@tauri-apps/api/core";
+import { clearProviderCache } from "./streaming";
 
 const LETTA_PROVIDER = "letta";
 
@@ -32,6 +33,7 @@ export async function getLettaApiKey(): Promise<string> {
 
 export function clearLettaApiKeyCache(): void {
   cachedApiKey = null;
+  clearProviderCache();
 }
 
 export function createLettaProvider(apiKey: string): LettaProvider {

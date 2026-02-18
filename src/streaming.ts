@@ -23,24 +23,19 @@ interface ConversationRecord {
   letta_agent_id: string | null;
 }
 
-let cachedProvider: { keyFingerprint: string; provider: LettaProvider } | null =
-  null;
-
-function keyFingerprint(key: string): string {
-  if (key.length < 12) {
-    return key.length.toString();
-  }
-  return `${key.slice(0, 6)}...${key.slice(-4)}:${key.length}`;
-}
+let cachedProvider: { apiKey: string; provider: LettaProvider } | null = null;
 
 function getOrCreateProvider(apiKey: string): LettaProvider {
-  const fp = keyFingerprint(apiKey);
-  if (cachedProvider?.keyFingerprint === fp) {
+  if (cachedProvider?.apiKey === apiKey) {
     return cachedProvider.provider;
   }
   const provider = createLettaProvider(apiKey);
-  cachedProvider = { keyFingerprint: fp, provider };
+  cachedProvider = { apiKey, provider };
   return provider;
+}
+
+export function clearProviderCache(): void {
+  cachedProvider = null;
 }
 
 async function resolveAgentId(

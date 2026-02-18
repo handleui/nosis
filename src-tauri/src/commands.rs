@@ -47,7 +47,7 @@ const DEFAULT_PAGE_SIZE: i32 = 100;
 const MAX_AGENT_ID_LENGTH: usize = 200;
 
 fn validate_agent_id(agent_id: &str) -> Result<(), AppError> {
-    validate_identifier(agent_id, MAX_AGENT_ID_LENGTH, "Agent ID", &['-', '_'])
+    validate_identifier(agent_id, MAX_AGENT_ID_LENGTH, "Agent ID", &['-', '_', '.', ':'])
 }
 
 fn gen_id() -> String {

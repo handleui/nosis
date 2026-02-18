@@ -62,6 +62,7 @@ function exposeDevGlobals() {
     });
 }
 
+// Only expose globals in dev builds — in production this would be an XSS vector.
 if (import.meta.env.DEV) {
   exposeDevGlobals();
   printDevHelp();
