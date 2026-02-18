@@ -208,12 +208,13 @@ fn vault_has_key(vault: &vault::ApiKeyVault, key: &[u8]) -> bool {
     let Ok(client) = vault.stronghold.get_client(b"api-keys") else {
         return false;
     };
-    client
-        .store()
-        .get(key)
-        .ok()
-        .flatten()
-        .is_some_and(|v| !v.is_empty())
+    let mut data = match client.store().get(key).ok().flatten() {
+        Some(d) => d,
+        None => return false,
+    };
+    let present = !data.is_empty();
+    data.zeroize();
+    present
 }
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {

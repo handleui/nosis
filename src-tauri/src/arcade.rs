@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use crate::util::truncate_to_char_boundary;
 
 const ARCADE_BASE_URL: &str = "https://api.arcade.dev";
@@ -184,7 +186,7 @@ pub(crate) fn validate_user_id(id: &str) -> Result<(), crate::error::AppError> {
 #[derive(Clone)]
 pub(crate) struct ArcadeClient {
     http: Client,
-    api_key: String,
+    api_key: Zeroizing<String>,
     base_url: String,
     user_id: String,
 }
@@ -215,7 +217,7 @@ impl ArcadeClient {
 
         Ok(Self {
             http,
-            api_key,
+            api_key: Zeroizing::new(api_key),
             base_url: base_url.unwrap_or_else(|| ARCADE_BASE_URL.to_string()),
             user_id,
         })
@@ -245,7 +247,7 @@ impl ArcadeClient {
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&*self.api_key)
             .send()
             .await
             .map_err(ArcadeError::Request)?;
@@ -261,7 +263,7 @@ impl ArcadeClient {
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&*self.api_key)
             .send()
             .await
             .map_err(ArcadeError::Request)?;
@@ -283,7 +285,7 @@ impl ArcadeClient {
         let resp = self
             .http
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&*self.api_key)
             .json(&body)
             .send()
             .await
@@ -306,7 +308,7 @@ impl ArcadeClient {
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&*self.api_key)
             .send()
             .await
             .map_err(ArcadeError::Request)?;
@@ -330,7 +332,7 @@ impl ArcadeClient {
         let resp = self
             .http
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&*self.api_key)
             .json(&body)
             .send()
             .await
