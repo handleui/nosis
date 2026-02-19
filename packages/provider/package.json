@@ -1,0 +1,17 @@
+{
+  "name": "@nosis/provider",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@letta-ai/vercel-ai-sdk-provider": "^1.4.0"
+  },
+  "peerDependencies": {
+    "ai": "^6.0.0"
+  }
+}
