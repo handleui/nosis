@@ -10,7 +10,9 @@
     "deploy": "wrangler deploy",
     "lint": "ultracite check",
     "fix": "ultracite fix",
-    "generate": "drizzle-kit generate"
+    "generate": "drizzle-kit generate",
+    "migrate:local": "wrangler d1 migrations apply nosis-db --local",
+    "db:reset": "rm -rf .wrangler/state && wrangler d1 migrations apply nosis-db --local"
   },
   "dependencies": {
     "@nosis/provider": "workspace:*",
