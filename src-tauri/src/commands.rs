@@ -1294,9 +1294,14 @@ pub async fn delete_mcp_server(app: AppHandle, id: String) -> Result<(), AppErro
     }
 
     // Shut down any active OAuth session for this server
-    if let Ok(mut map) = app.state::<OAuthSessions>().0.lock() {
-        if let Some(handle) = map.remove(&id) {
-            handle.shutdown();
+    match app.state::<OAuthSessions>().0.lock() {
+        Ok(mut map) => {
+            if let Some(handle) = map.remove(&id) {
+                handle.shutdown();
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "failed to lock OAuth sessions — callback server may remain active");
         }
     }
 

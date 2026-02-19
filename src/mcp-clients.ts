@@ -37,38 +37,66 @@ function generateOAuthState(): string {
 
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes, matches Rust server timeout
 
-async function waitForOAuthCode(expectedState: string): Promise<string> {
+function waitForOAuthCode(expectedState: string): {
+  promise: Promise<string>;
+  cancel: () => void;
+} {
   let resolveOuter!: (code: string) => void;
   let rejectOuter!: (err: Error) => void;
+  let cleanedUp = false;
 
   const result = new Promise<string>((res, rej) => {
     resolveOuter = res;
     rejectOuter = rej;
   });
 
-  const [unlistenCode, unlistenError] = await Promise.all([
+  let unlistenCode: (() => void) | undefined;
+  let unlistenError: (() => void) | undefined;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const cleanup = () => {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    unlistenCode?.();
+    unlistenError?.();
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  // Set up listeners asynchronously, but return synchronously
+  Promise.all([
     listen<OAuthCodePayload>("mcp-oauth-code", (event) => {
       if (event.payload.state !== expectedState) {
+        cleanup();
         rejectOuter(new Error("OAuth state mismatch — possible CSRF attempt"));
         return;
       }
+      cleanup();
       resolveOuter(event.payload.code);
     }),
     listen<string>("mcp-oauth-error", (event) => {
+      cleanup();
       rejectOuter(new Error(event.payload));
     }),
-  ]);
-
-  const cleanup = () => {
-    unlistenCode();
-    unlistenError();
-  };
-
-  const timeout = new Promise<never>((_, rej) => {
-    setTimeout(() => rej(new Error("OAuth flow timed out")), OAUTH_TIMEOUT_MS);
+  ]).then(([codeUn, errorUn]) => {
+    unlistenCode = codeUn;
+    unlistenError = errorUn;
+    // If already cancelled before listeners were set up, clean up now
+    if (cleanedUp) {
+      codeUn();
+      errorUn();
+    }
   });
 
-  return Promise.race([result, timeout]).finally(cleanup);
+  timeoutId = setTimeout(() => {
+    cleanup();
+    rejectOuter(new Error("OAuth flow timed out"));
+  }, OAUTH_TIMEOUT_MS);
+
+  return { promise: result, cancel: cleanup };
 }
 
 async function connectWithApiKey(server: McpServer): Promise<MCPClient> {
@@ -113,7 +141,24 @@ async function connectWithOAuth(server: McpServer): Promise<MCPClient> {
   });
   authProvider.updateRedirectUrl(`http://127.0.0.1:${port}/oauth/callback`);
 
-  const code = await waitForOAuthCode(oauthState);
+  const { promise: codePromise, cancel: cancelCodeWait } =
+    waitForOAuthCode(oauthState);
+
+  try {
+    const client = await createMCPClient({
+      transport: { type: "http", url: server.url, authProvider },
+    });
+    // Connected without needing the OAuth callback — clean up listeners
+    cancelCodeWait();
+    return client;
+  } catch (err) {
+    if (!(err instanceof UnauthorizedError)) {
+      cancelCodeWait();
+      throw err;
+    }
+  }
+
+  const code = await codePromise;
   await auth(authProvider, {
     serverUrl: server.url,
     authorizationCode: code,

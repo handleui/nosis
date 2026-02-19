@@ -121,7 +121,7 @@ async function runStream(
     callbacks.onDone?.(fullContent, model);
     return fullContent;
   } finally {
-    await cleanup();
+    await cleanup().catch(() => undefined);
   }
 }
 
