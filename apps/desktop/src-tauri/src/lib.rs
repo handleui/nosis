@@ -2,7 +2,6 @@ mod arcade;
 mod commands;
 mod db;
 mod error;
-mod exa;
 mod fal;
 mod oauth_callback;
 mod placement;
@@ -31,9 +30,9 @@ fn ensure_app_data_dir(app_data_dir: &std::path::Path) {
 
 fn init_tracing() {
     let default_filter = if cfg!(debug_assertions) {
-        "muppet_lib=debug,info"
+        "nosis_lib=debug,info"
     } else {
-        "muppet_lib=info,warn"
+        "nosis_lib=info,warn"
     };
 
     let filter =
@@ -47,7 +46,7 @@ fn init_tracing() {
 
 async fn init_db_pool(app_data_dir: &Path) -> Result<SqlitePool, Box<dyn std::error::Error>> {
     let connect_opts = SqliteConnectOptions::new()
-        .filename(app_data_dir.join("muppet.db"))
+        .filename(app_data_dir.join("nosis.db"))
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
@@ -90,11 +89,50 @@ fn warn_legacy_vault(app_data_dir: &Path) {
 
 fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent(concat!("muppet/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("nosis/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
         .build()
         .expect("failed to build HTTP client")
+}
+
+fn open_secret_store(app_data_dir: &Path) -> secrets::SecretStore {
+    let salt_path = app_data_dir.join("salt.txt");
+    let vault_key = secrets::derive_vault_key(&salt_path);
+    let snap_path = secrets::snapshot_path(app_data_dir);
+    secrets::SecretStore::open(&snap_path, vault_key).expect("failed to open secret store")
+}
+
+fn register_managed_state(
+    app: &mut tauri::App,
+    pool: SqlitePool,
+    secret_store: Arc<secrets::SecretStore>,
+    cached_fal_key: Option<String>,
+    arcade_client: Option<Arc<arcade::ArcadeClient>>,
+) {
+    app.manage(pool);
+    app.manage(Arc::clone(&secret_store));
+    app.manage(build_http_client());
+    app.manage(commands::FalKeyCache(std::sync::RwLock::new(cached_fal_key)));
+    app.manage(commands::OAuthSessions(std::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    )));
+    app.manage(std::sync::RwLock::new(arcade_client));
+}
+
+fn setup_placement(app: &mut tauri::App, app_data_dir: &Path) {
+    let placement_file = app_data_dir.join("placement.json");
+    let initial_mode = placement::load_state(&placement_file);
+    app.manage(placement::PlacementState {
+        mode: std::sync::Mutex::new(initial_mode),
+        state_file: placement_file,
+    });
+
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(e) = placement::apply_placement(&window, initial_mode) {
+            tracing::warn!(error = %e, "startup placement failed");
+        }
+    }
 }
 
 fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -106,57 +144,22 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     ensure_app_data_dir(&app_data_dir);
 
     let pool = tauri::async_runtime::block_on(init_db_pool(&app_data_dir))?;
-
-    // Derive vault key and open encrypted secret store.
-    let salt_path = app_data_dir.join("salt.txt");
-    let vault_key = secrets::derive_vault_key(&salt_path);
-    let snap_path = secrets::snapshot_path(&app_data_dir);
-    let secret_store = secrets::SecretStore::open(&snap_path, vault_key)
-        .expect("failed to open secret store");
-
+    let secret_store = open_secret_store(&app_data_dir);
     warn_legacy_vault(&app_data_dir);
 
-    // Load API keys from secret store into the in-memory caches.
-    let cached_exa_key = load_secret_string(&secret_store, "exa_api_key");
     let cached_fal_key = load_secret_string(&secret_store, "fal_api_key");
-
     let secret_store = Arc::new(secret_store);
-    let http_client = build_http_client();
-
-    // Load Arcade client from secret store + settings.
     let arcade_client =
         tauri::async_runtime::block_on(load_arcade_client(&pool, &secret_store));
 
-    app.manage(pool);
-    app.manage(Arc::clone(&secret_store));
-    app.manage(http_client);
-    app.manage(commands::ExaKeyCache(std::sync::RwLock::new(cached_exa_key)));
-    app.manage(commands::FalKeyCache(std::sync::RwLock::new(cached_fal_key)));
-    app.manage(commands::SearchRateLimiter(std::sync::Mutex::new(None)));
-    app.manage(commands::OAuthSessions(std::sync::Mutex::new(
-        std::collections::HashMap::new(),
-    )));
-    app.manage(std::sync::RwLock::new(arcade_client));
+    register_managed_state(app, pool, secret_store, cached_fal_key, arcade_client);
 
-    // Register the Stronghold plugin (still needed for its JS API surface).
+    let salt_path = app_data_dir.join("salt.txt");
     app.handle()
         .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())?;
 
-    // Set up placement state.
-    let placement_file = app_data_dir.join("placement.json");
-    let initial_mode = placement::load_state(&placement_file);
-    app.manage(placement::PlacementState {
-        mode: std::sync::Mutex::new(initial_mode),
-        state_file: placement_file,
-    });
-
+    setup_placement(app, &app_data_dir);
     commands::register_hotkey(app)?;
-
-    if let Some(window) = app.get_webview_window("main") {
-        if let Err(e) = placement::apply_placement(&window, initial_mode) {
-            tracing::warn!(error = %e, "startup placement failed — window may not be positioned correctly");
-        }
-    }
 
     Ok(())
 }
@@ -202,7 +205,7 @@ async fn load_arcade_client(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
-    tracing::info!("starting muppet");
+    tracing::info!("starting nosis");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -219,10 +222,6 @@ pub fn run() {
             commands::set_conversation_agent_id,
             commands::get_setting,
             commands::set_setting,
-            commands::store_exa_api_key,
-            commands::has_exa_api_key,
-            commands::delete_exa_api_key,
-            commands::search_web,
             commands::store_api_key,
             commands::get_api_key,
             commands::has_api_key,
@@ -249,5 +248,5 @@ pub fn run() {
             commands::shutdown_oauth_session,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running muppet");
+        .expect("error while running nosis");
 }

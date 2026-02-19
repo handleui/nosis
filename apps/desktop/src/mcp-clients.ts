@@ -7,7 +7,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ToolSet } from "ai";
-import { createMuppetOAuthProvider } from "./mcp-oauth";
+import { createNosisOAuthProvider } from "./mcp-oauth";
 
 interface McpServer {
   id: string;
@@ -116,7 +116,7 @@ async function connectWithApiKey(server: McpServer): Promise<MCPClient> {
 }
 
 async function connectWithOAuth(server: McpServer): Promise<MCPClient> {
-  const authProvider = createMuppetOAuthProvider(server.id);
+  const authProvider = createNosisOAuthProvider(server.id);
 
   // Try with cached tokens first — skip OAuth flow if still valid
   const cachedTokens = await authProvider.tokens();

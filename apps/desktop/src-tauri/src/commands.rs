@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::arcade::{self, ArcadeClient};
 use crate::error::AppError;
-use crate::exa::{self, ContentOptions, SearchCategory};
 use crate::fal;
 use crate::oauth_callback::OAuthSessionHandle;
 use crate::placement::{self, PlacementMode, PlacementState};
@@ -36,9 +35,7 @@ pub struct Message {
     pub created_at: String,
 }
 
-pub struct ExaKeyCache(pub RwLock<Option<String>>);
 pub struct FalKeyCache(pub RwLock<Option<String>>);
-pub struct SearchRateLimiter(pub Mutex<Option<std::time::Instant>>);
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct Generation {
@@ -206,18 +203,23 @@ fn is_trusted_fal_image_url(url: &str) -> bool {
     TRUSTED_FAL_HOSTS.contains(&host)
 }
 
-/// Validate that a base URL uses HTTPS (or HTTP for localhost dev) and has a valid host.
-/// Prevents SSRF via file://, ftp://, or requests to internal network addresses.
 pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
     let parsed = url::Url::parse(url_str)
         .map_err(|_| AppError::Validation("Base URL is not a valid URL".into()))?;
 
+    reject_url_credentials_and_extras(&parsed)?;
+    validate_url_scheme(&parsed)?;
+    reject_private_host(&parsed)?;
+
+    Ok(())
+}
+
+fn reject_url_credentials_and_extras(parsed: &url::Url) -> Result<(), AppError> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(AppError::Validation(
             "Base URL must not contain credentials".into(),
         ));
     }
-
     if parsed.fragment().is_some() {
         return Err(AppError::Validation(
             "Base URL must not contain a fragment (#)".into(),
@@ -228,81 +230,60 @@ pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
             "Base URL must not contain query parameters".into(),
         ));
     }
+    Ok(())
+}
 
+fn validate_url_scheme(parsed: &url::Url) -> Result<(), AppError> {
     match parsed.scheme() {
-        "https" => {}
-        "http" => {
-            let host = parsed.host_str().unwrap_or("");
-            if host != "localhost" {
-                return Err(AppError::Validation(
-                    "Base URL must use HTTPS (HTTP is only allowed for localhost)".into(),
-                ));
-            }
-        }
-        _ => {
-            return Err(AppError::Validation(
-                "Base URL must use HTTPS".into(),
-            ));
+        "https" => Ok(()),
+        "http" if parsed.host_str() == Some("localhost") => Ok(()),
+        "http" => Err(AppError::Validation(
+            "Base URL must use HTTPS (HTTP is only allowed for localhost)".into(),
+        )),
+        _ => Err(AppError::Validation("Base URL must use HTTPS".into())),
+    }
+}
+
+fn is_private_ipv4(ip: &std::net::Ipv4Addr) -> bool {
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+}
+
+fn is_private_ipv6(ip: &std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        if is_private_ipv4(&v4) {
+            return true;
         }
     }
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (ip.segments()[0] & 0xfe00) == 0xfc00
+        || (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+fn is_private_domain(domain: &str) -> bool {
+    let lower = domain.to_lowercase();
+    lower == "localhost"
+        || lower.ends_with(".internal")
+        || lower.ends_with(".local")
+        || lower.ends_with(".localhost")
+}
+
+fn reject_private_host(parsed: &url::Url) -> Result<(), AppError> {
+    let err = || AppError::Validation("Base URL must not point to a private or internal address".into());
 
     match parsed.host() {
-        Some(url::Host::Ipv4(ip)) => {
-            if ip.is_private()
-                || ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_multicast()
-            {
-                return Err(AppError::Validation(
-                    "Base URL must not point to a private or internal address".into(),
-                ));
-            }
-        }
-        Some(url::Host::Ipv6(ip)) => {
-            if let Some(v4) = ip.to_ipv4_mapped() {
-                if v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_unspecified()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_multicast()
-                {
-                    return Err(AppError::Validation(
-                        "Base URL must not point to a private or internal address".into(),
-                    ));
-                }
-            }
-            if ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || (ip.segments()[0] & 0xfe00) == 0xfc00
-                || (ip.segments()[0] & 0xffc0) == 0xfe80
-            {
-                return Err(AppError::Validation(
-                    "Base URL must not point to a private or internal address".into(),
-                ));
-            }
-        }
-        Some(url::Host::Domain(domain)) => {
-            let lower = domain.to_lowercase();
-            if lower == "localhost"
-                || lower.ends_with(".internal")
-                || lower.ends_with(".local")
-                || lower.ends_with(".localhost")
-            {
-                return Err(AppError::Validation(
-                    "Base URL must not point to a private or internal address".into(),
-                ));
-            }
-        }
-        None => {
-            return Err(AppError::Validation("Base URL must have a valid host".into()));
-        }
+        Some(url::Host::Ipv4(ip)) if is_private_ipv4(&ip) => Err(err()),
+        Some(url::Host::Ipv6(ip)) if is_private_ipv6(&ip) => Err(err()),
+        Some(url::Host::Domain(domain)) if is_private_domain(domain) => Err(err()),
+        None => Err(AppError::Validation("Base URL must have a valid host".into())),
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
 fn get_pool(app: &AppHandle) -> Result<&SqlitePool, AppError> {
@@ -320,12 +301,6 @@ fn get_secret_store(app: &AppHandle) -> Result<Arc<SecretStore>, AppError> {
 fn get_http_client(app: &AppHandle) -> Result<&reqwest::Client, AppError> {
     app.try_state::<reqwest::Client>()
         .ok_or(AppError::Internal("HTTP client not initialized".into()))
-        .map(|state| state.inner())
-}
-
-fn get_exa_key_cache(app: &AppHandle) -> Result<&ExaKeyCache, AppError> {
-    app.try_state::<ExaKeyCache>()
-        .ok_or(AppError::Internal("API key cache not initialized".into()))
         .map(|state| state.inner())
 }
 
@@ -606,81 +581,6 @@ pub fn get_placement_mode(app: AppHandle) -> Result<PlacementMode, AppError> {
     Ok(mode)
 }
 
-// ── Exa API Key Commands ──
-
-#[tauri::command]
-#[instrument(skip(app, key))]
-pub async fn store_exa_api_key(app: AppHandle, key: String) -> Result<(), AppError> {
-    validate_api_key(&key)?;
-    let store = get_secret_store(&app)?;
-    let key_bytes = key.as_bytes().to_vec();
-    blocking(move || store.insert("exa_api_key", key_bytes)).await?;
-    *write_cache(&get_exa_key_cache(&app)?.0)? = Some(key);
-    info!("stored exa API key");
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn has_exa_api_key(app: AppHandle) -> Result<bool, AppError> {
-    Ok(read_cache(&get_exa_key_cache(&app)?.0)?.is_some())
-}
-
-#[tauri::command]
-#[instrument(skip(app))]
-pub async fn delete_exa_api_key(app: AppHandle) -> Result<(), AppError> {
-    let store = get_secret_store(&app)?;
-    blocking(move || store.remove("exa_api_key")).await?;
-    *write_cache(&get_exa_key_cache(&app)?.0)? = None;
-    info!("deleted exa API key");
-    Ok(())
-}
-
-// ── Search Commands ──
-
-#[tauri::command]
-pub async fn search_web(
-    app: AppHandle,
-    query: String,
-    num_results: Option<u32>,
-    category: Option<SearchCategory>,
-) -> Result<exa::SearchResponse, AppError> {
-    let request = exa::SearchRequest {
-        query,
-        r#type: None,
-        category,
-        num_results,
-        contents: Some(ContentOptions { text: Some(true) }),
-    };
-
-    exa::validate_search_request(&request)?;
-
-    // Rate-limit to prevent abuse (e.g. via XSS) that could exhaust API credits.
-    {
-        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-        let limiter = app
-            .try_state::<SearchRateLimiter>()
-            .ok_or(AppError::Internal("Rate limiter not initialized".into()))?;
-        let mut last = limiter.0.lock().map_err(|_| {
-            AppError::Internal("Failed to acquire rate limiter lock".into())
-        })?;
-        let now = std::time::Instant::now();
-        if let Some(prev) = *last {
-            if now.duration_since(prev) < MIN_INTERVAL {
-                return Err(AppError::RateLimited);
-            }
-        }
-        *last = Some(now);
-    }
-
-    let api_key = read_cache(&get_exa_key_cache(&app)?.0)?
-        .clone()
-        .ok_or(AppError::ApiKeyNotConfigured)?;
-
-    let http = get_http_client(&app)?;
-    let client = exa::ExaClient::new(http, &api_key);
-    client.search(&request).await
-}
-
 // ── Generic API Key Commands ──
 
 #[tauri::command]
@@ -855,38 +755,18 @@ fn get_arcade_client(app: &AppHandle) -> Result<Arc<ArcadeClient>, AppError> {
         .ok_or(AppError::ArcadeNotConfigured)
 }
 
-#[tauri::command]
-pub async fn arcade_set_config(
-    app: AppHandle,
-    api_key: String,
-    user_id: String,
-    base_url: Option<String>,
+async fn persist_arcade_settings(
+    pool: &SqlitePool,
+    user_id: &str,
+    base_url: &Option<String>,
 ) -> Result<(), AppError> {
-    validate_non_empty_bounded(&api_key, MAX_ARCADE_API_KEY_LENGTH, "API key")?;
-    arcade::validate_user_id(&user_id)?;
-    if let Some(ref url) = base_url {
-        validate_non_empty_bounded(url, MAX_ARCADE_BASE_URL_LENGTH, "Base URL")?;
-        validate_base_url(url)?;
-    }
-
-    // Store API key in the encrypted secret store
-    let store = get_secret_store(&app)?;
-    let key_bytes = api_key.as_bytes().to_vec();
-    blocking({
-        let store = Arc::clone(&store);
-        move || store.insert("arcade_api_key", key_bytes)
-    })
-    .await?;
-
-    // Store non-secret config in settings
-    let pool = get_pool(&app)?;
     let mut tx = pool.begin().await?;
 
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES ('arcade_user_id', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
@@ -905,14 +785,45 @@ pub async fn arcade_set_config(
     }
 
     tx.commit().await?;
+    Ok(())
+}
 
-    let client = ArcadeClient::new(api_key, user_id, base_url)?;
+fn set_arcade_client(app: &AppHandle, client: ArcadeClient) -> Result<(), AppError> {
     let state = app.state::<RwLock<Option<Arc<ArcadeClient>>>>();
     let mut guard = state.write().map_err(|e| {
         error!(error = %e, "arcade RwLock poisoned");
         AppError::ArcadeNotConfigured
     })?;
     *guard = Some(Arc::new(client));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn arcade_set_config(
+    app: AppHandle,
+    api_key: String,
+    user_id: String,
+    base_url: Option<String>,
+) -> Result<(), AppError> {
+    validate_non_empty_bounded(&api_key, MAX_ARCADE_API_KEY_LENGTH, "API key")?;
+    arcade::validate_user_id(&user_id)?;
+    if let Some(ref url) = base_url {
+        validate_non_empty_bounded(url, MAX_ARCADE_BASE_URL_LENGTH, "Base URL")?;
+        validate_base_url(url)?;
+    }
+
+    let store = get_secret_store(&app)?;
+    let key_bytes = api_key.as_bytes().to_vec();
+    blocking({
+        let store = Arc::clone(&store);
+        move || store.insert("arcade_api_key", key_bytes)
+    })
+    .await?;
+
+    persist_arcade_settings(get_pool(&app)?, &user_id, &base_url).await?;
+
+    let client = ArcadeClient::new(api_key, user_id, base_url)?;
+    set_arcade_client(&app, client)?;
 
     Ok(())
 }
@@ -983,6 +894,17 @@ pub struct AuthorizeResult {
     pub url: Option<String>,
 }
 
+fn open_auth_url_if_valid(app: &AppHandle, url_str: Option<&str>) {
+    let Some(url_str) = url_str else { return };
+    let Ok(parsed) = url::Url::parse(url_str) else { return };
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return;
+    }
+    if let Err(e) = app.opener().open_url(url_str, None::<&str>) {
+        error!(error = %e, "failed to open authorization URL");
+    }
+}
+
 #[tauri::command]
 pub async fn arcade_authorize_tool(
     app: AppHandle,
@@ -995,15 +917,7 @@ pub async fn arcade_authorize_tool(
     let status = resp.status.clone().unwrap_or_default();
 
     if status != "completed" {
-        if let Some(ref url_str) = resp.url {
-            if let Ok(parsed) = url::Url::parse(url_str) {
-                if parsed.scheme() == "https" || parsed.scheme() == "http" {
-                    if let Err(e) = app.opener().open_url(url_str, None::<&str>) {
-                        error!(error = %e, "failed to open authorization URL");
-                    }
-                }
-            }
-        }
+        open_auth_url_if_valid(&app, resp.url.as_deref());
     }
 
     Ok(AuthorizeResult {

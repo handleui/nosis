@@ -1,7 +1,7 @@
 {
-  "productName": "Muppet",
+  "productName": "Nosis",
   "version": "0.1.0",
-  "identifier": "com.muppet.app",
+  "identifier": "com.nosis.app",
   "build": {
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build",
@@ -14,7 +14,7 @@
     },
     "windows": [
       {
-        "title": "Muppet",
+        "title": "Nosis",
         "width": 720,
         "height": 560,
         "resizable": true,

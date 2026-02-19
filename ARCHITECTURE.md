@@ -1,11 +1,11 @@
-# Muppet Architecture
+# Nosis Architecture
 
 Aggressively performant AI chat client for macOS. Turborepo monorepo with a Tauri 2 desktop app (Rust backend + Svelte frontend planned) and a Cloudflare Workers API.
 
 ## Directory Layout
 
 ```
-muppet/
+nosis/
 ├── apps/
 │   ├── desktop/               # Tauri desktop app
 │   │   ├── src/               # Frontend (Svelte + TypeScript, served by Vite)
@@ -13,7 +13,7 @@ muppet/
 │   │   │   └── streaming.ts   # AI SDK + Anthropic streaming chat
 │   │   ├── src-tauri/         # Backend (Rust)
 │   │   │   ├── src/
-│   │   │   │   ├── main.rs        # Binary entry — calls muppet_lib::run()
+│   │   │   │   ├── main.rs        # Binary entry — calls nosis_lib::run()
 │   │   │   │   ├── lib.rs         # Tauri builder, plugin setup, DB pool init
 │   │   │   │   ├── db.rs          # Versioned migration runner
 │   │   │   │   ├── error.rs       # AppError enum (thiserror + Serialize for IPC)
@@ -45,7 +45,7 @@ muppet/
 
 ### Database — SQLite via sqlx 0.8
 
-- **Location**: `~/.local/share/com.muppet.app/muppet.db`
+- **Location**: `~/.local/share/com.nosis.app/nosis.db`
 - **Pool**: 2 connections (1 writer + 1 reader under WAL)
 - **PRAGMAs**: WAL journal, synchronous=NORMAL, 64MB cache, memory temp_store, 256MB mmap
 - **Migrations**: Hand-rolled versioned system in `db.rs`. Each version is a `(i64, Vec<&str>)` applied once inside a transaction, tracked in `schema_version` table.
@@ -85,7 +85,7 @@ All commands go through `tauri::command` and are callable from the frontend via 
 
 Svelte UI is planned. Current modules:
 
-- `main.ts` — IPC bridge entry point; exposes `window.__muppet_invoke()` in dev mode
+- `main.ts` — IPC bridge entry point; exposes `window.__nosis_invoke()` in dev mode
 - `streaming.ts` — AI SDK + Anthropic streaming chat with abort support, token usage tracking, and API key redaction
 
 - **Dev server**: `localhost:1420`, HMR enabled

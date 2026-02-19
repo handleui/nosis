@@ -28,7 +28,7 @@ impl OAuthSessionHandle {
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUCCESS_HTML: &str = "<html><body><h1>Authorization successful</h1>\
-                            <p>You can close this tab and return to Muppet.</p>\
+                            <p>You can close this tab and return to Nosis.</p>\
                             </body></html>";
 
 /// Starts a temporary localhost HTTP server on a random port, returning the port
