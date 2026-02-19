@@ -269,7 +269,11 @@ async function readResponseBody(response: Response): Promise<unknown> {
     throwResponseTooLarge();
   }
 
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    badUpstream();
+  }
 }
 
 export async function scrapeUrl(
