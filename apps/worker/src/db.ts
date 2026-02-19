@@ -107,6 +107,21 @@ export async function setConversationAgentId(
   }
 }
 
+/** Atomically set agent ID only if not already set. Returns true if this call won. */
+export async function trySetConversationAgentId(
+  db: D1Database,
+  id: string,
+  agentId: string
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      "UPDATE conversations SET letta_agent_id = ?, updated_at = datetime('now') WHERE id = ? AND letta_agent_id IS NULL"
+    )
+    .bind(agentId, id)
+    .run();
+  return result.meta.changes > 0;
+}
+
 // ── Messages ──
 
 export async function getMessages(
@@ -115,16 +130,20 @@ export async function getMessages(
   limit: number,
   offset: number
 ): Promise<Message[]> {
-  await getConversation(db, conversationId);
+  const [convResult, msgResult] = await db.batch([
+    db.prepare("SELECT 1 FROM conversations WHERE id = ?").bind(conversationId),
+    db
+      .prepare(
+        "SELECT id, conversation_id, role, content, model, tokens_in, tokens_out, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?"
+      )
+      .bind(conversationId, limit, offset),
+  ]);
 
-  const { results } = await db
-    .prepare(
-      "SELECT id, conversation_id, role, content, model, tokens_in, tokens_out, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?"
-    )
-    .bind(conversationId, limit, offset)
-    .all<Message>();
+  if (convResult.results.length === 0) {
+    notFound("Conversation");
+  }
 
-  return results;
+  return msgResult.results as Message[];
 }
 
 export async function saveMessage(
@@ -137,11 +156,32 @@ export async function saveMessage(
   tokensIn: number,
   tokensOut: number
 ): Promise<Message> {
-  // Verify the conversation exists before the batch — avoids a FK constraint
-  // error from D1 producing a 500 instead of the intended 404.
+  // Verify existence first — D1 FK errors surface as 500, not 404
   await getConversation(db, conversationId);
 
-  // Single batch: update conversation timestamp + insert message with RETURNING
+  return saveMessageBatch(
+    db,
+    id,
+    conversationId,
+    role,
+    content,
+    model,
+    tokensIn,
+    tokensOut
+  );
+}
+
+/** Insert a message without the conversation-existence check. */
+export async function saveMessageBatch(
+  db: D1Database,
+  id: string,
+  conversationId: string,
+  role: string,
+  content: string,
+  model: string | null,
+  tokensIn: number,
+  tokensOut: number
+): Promise<Message> {
   const [, insertResult] = await db.batch([
     db
       .prepare(

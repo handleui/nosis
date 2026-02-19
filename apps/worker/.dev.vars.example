@@ -1,0 +1,20 @@
+# Wrangler local development secrets
+# Copy to .dev.vars and fill in real values:
+#   cp .dev.vars.example .dev.vars
+#
+# These are injected as Workers Secrets during `wrangler dev`.
+# In production, set them via `wrangler secret put <NAME>`.
+# See: https://developers.cloudflare.com/workers/configuration/secrets/
+
+# Optional. Omit or leave empty for production behavior (CORS restricted).
+# Set to any value to enable permissive CORS for local dev.
+ENVIRONMENT=development
+
+# Exa AI web search — https://exa.ai
+EXA_API_KEY=
+
+# Firecrawl web scraping — https://firecrawl.dev
+FIRECRAWL_API_KEY=
+
+# Letta AI (agent memory + Anthropic routing) — https://letta.com
+LETTA_API_KEY=

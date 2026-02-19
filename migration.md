@@ -91,13 +91,30 @@ D1 database with conversations + messages tables. REST endpoints mirror Tauri IP
 - Remove CRUD from `commands.rs` (Phase 5)
 - Frontend calls Worker instead of `invoke()` (Phase 5)
 
-## Phase 4: Move AI streaming
+## Phase 4: Move AI streaming ✓
 
-- Vercel AI SDK `streamText()` on the Worker
-- SSE streaming to clients via Hono's `streamSSE`
-- Consider `@cloudflare/ai-chat` if stable (v0.1.0 as of 2026-02-17)
-- Remove `streaming.ts` from frontend
-- Anthropic/Letta keys stay server-side
+Letta AI as the sole provider, streaming through the Worker. Agent-per-conversation with server-side memory.
+
+**Deliverables:**
+- `packages/provider/` — shared `@nosis/provider` package wrapping `@letta-ai/vercel-ai-sdk-provider`
+  - `createProvider(apiKey)` — creates Letta provider
+  - `createAgent(provider, conversationId)` — creates agent with Nosis defaults (persona, memory blocks)
+  - Constants: `DEFAULT_MODEL`, `DEFAULT_CONTEXT_WINDOW`, `DEFAULT_PERSONA`, `DEFAULT_HUMAN`
+- `apps/worker/src/chat.ts` — streaming endpoint logic
+  - Creates Letta agent on first chat, stores `letta_agent_id` in D1
+  - Atomic agent creation (race-condition safe)
+  - Orphan cleanup on D1 save failure
+  - Streams via `result.toTextStreamResponse()` with CF Workers headers
+  - Persists user + assistant messages to D1 (cache for fast reads)
+- `POST /api/conversations/:id/chat` route in `src/index.ts`
+  - Accepts `{ content: string }` — only the latest user message (Letta manages history)
+  - `LETTA_API_KEY` in Workers Secrets
+- No `@ai-sdk/anthropic` or `@cloudflare/ai-chat` — Letta handles Anthropic routing
+
+**Not yet done (deferred):**
+- Remove `streaming.ts` and `letta.ts` from frontend (Phase 5)
+- Frontend consuming Worker stream (Phase 5)
+- MCP tools on the Worker (future)
 
 ## Phase 5: Shrink Rust
 

@@ -12,6 +12,8 @@
     "fix": "ultracite fix"
   },
   "dependencies": {
+    "@nosis/provider": "workspace:*",
+    "ai": "^6.0.87",
     "hono": "^4.7.0"
   },
   "devDependencies": {

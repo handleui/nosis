@@ -3,6 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
+import { streamChat } from "./chat";
 import {
   createConversation,
   deleteConversation,
@@ -15,6 +16,7 @@ import {
 } from "./db";
 import { searchExa, validateSearchRequest } from "./exa";
 import { scrapeUrl, validateScrapeRequest } from "./firecrawl";
+import { redactSecrets, sanitizeError } from "./sanitize";
 import {
   parseJsonBody,
   validateAgentId,
@@ -34,6 +36,7 @@ interface Bindings {
   ENVIRONMENT?: string;
   EXA_API_KEY: string;
   FIRECRAWL_API_KEY: string;
+  LETTA_API_KEY: string;
   DB: D1Database;
 }
 
@@ -50,7 +53,7 @@ app.use(
       }
       return allowed.includes(origin) ? origin : "";
     },
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowMethods: ["GET", "POST", "DELETE", "PATCH", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     maxAge: 86_400,
     credentials: false,
@@ -59,7 +62,7 @@ app.use(
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
-// Reject non-JSON content types on mutation requests (CSRF defense-in-depth)
+// Reject non-JSON content types on mutation requests (CSRF defense)
 app.use(async (c, next) => {
   const method = c.req.method;
   if (method === "POST" || method === "PATCH" || method === "PUT") {
@@ -198,13 +201,41 @@ app.post(
   }
 );
 
-// ── Error Handler ──
+// ── Chat (AI Streaming) ──
+
+app.post(
+  "/api/conversations/:id/chat",
+  bodyLimit({ maxSize: MAX_MESSAGE_BYTES }),
+  async (c) => {
+    const conversationId = validateUuid(c.req.param("id"));
+    const body = await parseJsonBody(c);
+    const content = validateContent(body.content);
+    return streamChat(
+      c.env.DB,
+      c.env.LETTA_API_KEY,
+      conversationId,
+      content,
+      c.executionCtx
+    );
+  }
+);
+
+// ── Not-Found & Error Handlers ──
+
+app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 app.onError((err, c) => {
+  const secrets = [
+    c.env.LETTA_API_KEY,
+    c.env.EXA_API_KEY,
+    c.env.FIRECRAWL_API_KEY,
+  ] as const;
+
   if (err instanceof HTTPException) {
-    return c.json({ error: err.message }, err.status);
+    return c.json({ error: redactSecrets(err.message, secrets) }, err.status);
   }
-  console.error("Unhandled error:", err);
+
+  console.error("Unhandled error:", sanitizeError(err));
   return c.json({ error: "Internal server error" }, 500);
 });
 
