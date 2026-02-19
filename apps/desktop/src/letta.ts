@@ -9,7 +9,7 @@ const LETTA_PROVIDER = "letta";
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_PERSONA =
-  "I am Muppet, a helpful AI assistant. I remember our conversations and learn your preferences over time.";
+  "I am Nosis, a helpful AI assistant. I remember our conversations and learn your preferences over time.";
 const DEFAULT_HUMAN = "The user has not shared personal details yet.";
 
 export async function getLettaApiKey(): Promise<string> {
@@ -33,7 +33,7 @@ export async function createAgentForConversation(
   conversationId: string
 ): Promise<string> {
   const agent = await provider.client.agents.create({
-    name: `muppet-${conversationId.slice(0, 8)}`,
+    name: `nosis-${conversationId.slice(0, 8)}`,
     model: DEFAULT_MODEL,
     contextWindowLimit: DEFAULT_CONTEXT_WINDOW,
     memoryBlocks: [

@@ -56,13 +56,11 @@ async function saveVaultString(
   });
 }
 
-export type MuppetOAuthProvider = OAuthClientProvider & {
+export type NosisOAuthProvider = OAuthClientProvider & {
   updateRedirectUrl(url: string): void;
 };
 
-export function createMuppetOAuthProvider(
-  serverId: string
-): MuppetOAuthProvider {
+export function createNosisOAuthProvider(serverId: string): NosisOAuthProvider {
   const state = { redirectUrl: "http://localhost/oauth/callback" };
 
   return {
@@ -76,7 +74,7 @@ export function createMuppetOAuthProvider(
 
     get clientMetadata(): OAuthClientMetadata {
       return {
-        client_name: "Muppet",
+        client_name: "Nosis",
         redirect_uris: [state.redirectUrl],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],

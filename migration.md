@@ -1,4 +1,4 @@
-# Muppet Cloud Migration
+# Nosis Cloud Migration
 
 Migrating from Tauri-only to cloud-first. Tauri remains as a thin desktop shell (window placement, global hotkey). Everything else moves to a Cloudflare Worker.
 
@@ -38,7 +38,7 @@ Tauri Desktop Shell (kept)
     └── Stronghold (auth token only)
 ```
 
-## Phase 1: Scaffold Worker ← current
+## Phase 1: Scaffold Worker ✓
 
 Stand up the Cloudflare Worker with Hono. Health endpoint, CORS for Tauri, basic project structure. No auth, no database, no AI — just prove the infrastructure works.
 
@@ -55,16 +55,16 @@ Stand up the Cloudflare Worker with Hono. Health endpoint, CORS for Tauri, basic
 - `apps/worker/package.json`
 - `migration.md` (this file)
 
-## Phase 2: Move integrations
+## Phase 2: Move Exa search ✓
 
-Move Exa search and API key management to the Worker. Server-side secrets replace per-device key configuration.
+Move Exa search to the Worker. Server-side secrets replace per-device key configuration.
 
-- Exa search endpoint (`POST /api/search`)
-- Workers Secrets for API keys (Exa, Letta, fal, ElevenLabs)
-- Remove `exa.rs` from Rust backend
-- Frontend calls Worker instead of `invoke("search_web")`
+- `POST /api/search` endpoint on Worker (`apps/worker/src/exa.ts`)
+- `EXA_API_KEY` via Workers Secrets (replaces Stronghold vault)
+- Removed `exa.rs`, Exa commands, and related error variants from Rust backend
+- Rate limiting deferred to auth phase
 
-## Phase 3: Move conversation/message CRUD
+## Phase 3: Move conversation/message CRUD ← current
 
 - D1 database with conversations + messages tables
 - REST endpoints mirroring current Tauri IPC commands
@@ -81,7 +81,7 @@ Move Exa search and API key management to the Worker. Server-side secrets replac
 
 ## Phase 5: Shrink Rust
 
-- Remove `commands.rs` CRUD, `exa.rs`, `streaming.ts`
+- Remove `commands.rs` CRUD, `streaming.ts`
 - Rust backend: ~150 lines (placement + hotkey + auth token in Stronghold)
 - `lib.rs` bootstraps Tauri with minimal plugins
 - CSP updated to allow Worker domain only

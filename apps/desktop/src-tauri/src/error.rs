@@ -27,18 +27,6 @@ pub enum AppError {
     #[error("Secret storage error")]
     SecretStore(String),
 
-    #[error("Search request failed")]
-    ExaRequest,
-
-    #[error("Invalid API key")]
-    ExaAuth,
-
-    #[error("Rate limit exceeded, please try again later")]
-    ExaRateLimit,
-
-    #[error("Too many requests, please wait before searching again")]
-    RateLimited,
-
     #[error("Window placement failed")]
     Placement(String),
 

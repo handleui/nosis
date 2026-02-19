@@ -208,7 +208,7 @@ impl ArcadeClient {
         base_url: Option<String>,
     ) -> Result<Self, ArcadeError> {
         let http = Client::builder()
-            .user_agent("muppet/0.1.0")
+            .user_agent("nosis/0.1.0")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none())

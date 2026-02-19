@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::error::AppError;
 
-const CLIENT_NAME: &[u8] = b"muppet_secrets_v1";
+const CLIENT_NAME: &[u8] = b"nosis_secrets_v1";
 
 pub struct SecretStore {
     stronghold: iota_stronghold::Stronghold,
@@ -151,4 +151,4 @@ pub fn snapshot_path(app_data_dir: &Path) -> PathBuf {
 // raw snapshot file, but does NOT protect secrets if an attacker has access to
 // both the app data directory and the binary. A user-provided passphrase or
 // OS keychain integration would be needed for stronger protection.
-const VAULT_PASSWORD: &str = "muppet-internal-vault-v1";
+const VAULT_PASSWORD: &str = "nosis-internal-vault-v1";

@@ -1,4 +1,4 @@
-# Muppet
+# Nosis
 
 Tauri 2 desktop AI chat client for macOS. Turborepo monorepo with Rust backend, Svelte frontend (planned).
 
@@ -10,8 +10,8 @@ bun run build            # build all apps via turbo
 bun run dev              # dev all apps via turbo
 
 # Single app:
-turbo run dev --filter=muppet-desktop
-turbo run dev --filter=muppet-worker
+turbo run dev --filter=nosis-desktop
+turbo run dev --filter=nosis-worker
 
 # Tauri desktop specifically:
 cd apps/desktop && bun run tauri dev
@@ -28,12 +28,16 @@ Rust backend compiles on `tauri dev` automatically. Frontend is Vite on port 142
   - `apps/desktop/src-tauri/src/db.rs` — Versioned migration runner
   - `apps/desktop/src-tauri/src/error.rs` — `AppError` enum (thiserror-based, Serialize for IPC)
   - `apps/desktop/src-tauri/src/commands.rs` — All IPC command handlers
-  - `apps/desktop/src-tauri/src/exa.rs` — Exa AI web search integration
+  - `apps/desktop/src-tauri/src/arcade.rs` — Arcade AI tool integration
+  - `apps/desktop/src-tauri/src/fal.rs` — Fal.ai image generation client
+  - `apps/desktop/src-tauri/src/oauth_callback.rs` — OAuth callback server for MCP auth
   - `apps/desktop/src-tauri/src/placement.rs` — Window placement modes
-  - `apps/desktop/src-tauri/src/supermemory.rs` — Supermemory persistent chat memory
+  - `apps/desktop/src-tauri/src/secrets.rs` — Encrypted secret store (replaces Stronghold vault)
   - `apps/desktop/src-tauri/src/vault.rs` — Stronghold vault helpers
 - `apps/worker/` — Cloudflare Workers API (Hono)
-  - `apps/worker/src/index.ts` — Hono app with CORS, health endpoint
+  - `apps/worker/src/index.ts` — Hono app with CORS, health, and Exa search endpoint
+  - `apps/worker/src/exa.ts` — Exa AI web search validation and client
+  - `apps/worker/src/types.ts` — Shared TypeScript types for Exa search
   - `apps/worker/wrangler.jsonc` — Wrangler config
 - `packages/` — Shared libraries (future)
 
