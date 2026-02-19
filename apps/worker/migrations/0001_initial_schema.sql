@@ -1,8 +1,6 @@
 -- Migration 0001: conversations and messages tables
 -- Mirrors Rust SQLite schema from db.rs (migrations v1 + v3)
 
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE conversations (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT 'New Conversation',
