@@ -34,7 +34,6 @@ tiny_http = "0.12"
 urlencoding = "2"
 
 [profile.release]
-# Optimize for size with LTO for smaller, faster desktop app binary
 lto = true
 opt-level = "s"
 codegen-units = 1

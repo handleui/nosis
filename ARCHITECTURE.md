@@ -1,27 +1,44 @@
 # Muppet Architecture
 
-Aggressively performant AI chat client for macOS. Tauri 2 desktop app with a Rust backend and a Svelte frontend (planned).
+Aggressively performant AI chat client for macOS. Turborepo monorepo with a Tauri 2 desktop app (Rust backend + Svelte frontend planned) and a Cloudflare Workers API.
 
 ## Directory Layout
 
 ```
 muppet/
-├── src/                    # Frontend (Svelte + TypeScript, served by Vite)
-│   └── main.ts             # Entry point — Tauri IPC bridge
-├── src-tauri/              # Backend (Rust)
-│   ├── src/
-│   │   ├── main.rs          # Binary entry — calls muppet_lib::run()
-│   │   ├── lib.rs           # Tauri builder, plugin setup, DB pool init
-│   │   ├── db.rs            # Versioned migration runner
-│   │   ├── error.rs         # AppError enum (thiserror + Serialize for IPC)
-│   │   └── commands.rs      # Tauri IPC command handlers (CRUD + hotkey)
-│   ├── capabilities/
-│   │   └── default.json     # Tauri permission grants for the main window
-│   ├── Cargo.toml           # Rust deps
-│   └── tauri.conf.json      # Tauri config (build commands, CSP, window, plugins)
-├── package.json             # Frontend deps + scripts (bun)
-├── vite.config.ts           # Vite dev server + build config
-└── tsconfig.json            # TypeScript config
+├── apps/
+│   ├── desktop/               # Tauri desktop app
+│   │   ├── src/               # Frontend (Svelte + TypeScript, served by Vite)
+│   │   │   ├── main.ts        # Entry point — Tauri IPC bridge
+│   │   │   └── streaming.ts   # AI SDK + Anthropic streaming chat
+│   │   ├── src-tauri/         # Backend (Rust)
+│   │   │   ├── src/
+│   │   │   │   ├── main.rs        # Binary entry — calls muppet_lib::run()
+│   │   │   │   ├── lib.rs         # Tauri builder, plugin setup, DB pool init
+│   │   │   │   ├── db.rs          # Versioned migration runner
+│   │   │   │   ├── error.rs       # AppError enum (thiserror + Serialize for IPC)
+│   │   │   │   ├── commands.rs    # Tauri IPC command handlers (CRUD + hotkey)
+│   │   │   │   ├── exa.rs         # Exa AI web search integration
+│   │   │   │   ├── placement.rs   # Window placement modes
+│   │   │   │   ├── supermemory.rs # Supermemory persistent chat memory
+│   │   │   │   └── vault.rs       # Stronghold vault helpers
+│   │   │   ├── capabilities/
+│   │   │   │   └── default.json # Tauri permission grants for the main window
+│   │   │   ├── Cargo.toml      # Rust deps
+│   │   │   └── tauri.conf.json # Tauri config (build commands, CSP, window, plugins)
+│   │   ├── package.json        # Desktop app deps + scripts
+│   │   ├── vite.config.ts      # Vite dev server + build config
+│   │   └── tsconfig.json       # TypeScript config
+│   └── worker/                # Cloudflare Workers API
+│       ├── src/
+│       │   └── index.ts       # Hono app with CORS, health endpoint
+│       ├── package.json
+│       ├── tsconfig.json
+│       └── wrangler.jsonc
+├── packages/                  # Shared libraries (future)
+├── package.json               # Monorepo root (workspaces, turbo delegation)
+├── turbo.json                 # Task orchestration
+└── biome.jsonc                # Shared lint/format config (Ultracite)
 ```
 
 ## Backend (Rust / Tauri)
@@ -66,18 +83,28 @@ All commands go through `tauri::command` and are callable from the frontend via 
 
 ## Frontend (TypeScript / Vite)
 
-Currently minimal — just an IPC bridge. Svelte UI is planned.
+Svelte UI is planned. Current modules:
+
+- `main.ts` — IPC bridge entry point; exposes `window.__muppet_invoke()` in dev mode
+- `streaming.ts` — AI SDK + Anthropic streaming chat with abort support, token usage tracking, and API key redaction
 
 - **Dev server**: `localhost:1420`, HMR enabled
 - **Build target**: ES2021 (Tauri's WebKit/Chromium baseline)
-- **Dev mode**: Exposes `window.__muppet_invoke()` for console testing
 
 ## Build & Run
 
 ```bash
-bun install          # Install frontend deps
-bun run tauri dev    # Dev mode (hot reload frontend + Rust rebuild)
-bun run tauri build  # Production build
+bun install                    # Install all workspace deps
+bun run build                  # Build all apps via turbo
+bun run dev                    # Dev all apps via turbo
+
+# Desktop app:
+cd apps/desktop && bun run tauri dev    # Dev mode (hot reload frontend + Rust rebuild)
+cd apps/desktop && bun run tauri build  # Production build
+
+# Worker:
+cd apps/worker && bun run dev           # Wrangler dev server
+cd apps/worker && bun run deploy        # Deploy to Cloudflare
 ```
 
 ## Release Profile

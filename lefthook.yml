@@ -6,6 +6,7 @@ pre-commit:
         - "**/*.jsx"
         - "**/*.ts"
         - "**/*.tsx"
+        - "**/*.svelte"
         - "**/*.json"
         - "**/*.jsonc"
         - "**/*.css"

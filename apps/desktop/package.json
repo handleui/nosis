@@ -1,0 +1,30 @@
+{
+  "name": "muppet-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check-types": "tsc --noEmit",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.44",
+    "@ai-sdk/mcp": "^1.0.21",
+    "@letta-ai/vercel-ai-sdk-provider": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-global-shortcut": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-stronghold": "^2",
+    "ai": "^6.0.87",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5.9.0",
+    "vite": "^6.3.0"
+  }
+}

@@ -44,9 +44,6 @@ fn get_screen_geometry(window: &WebviewWindow) -> Result<ScreenGeometry, AppErro
         .ok_or_else(|| AppError::Placement("No monitor found".into()))?;
 
     let scale = monitor.scale_factor();
-    // Use the work area rather than the full monitor size so that
-    // system chrome (macOS menu bar, Windows taskbar, etc.) is
-    // automatically excluded without any hardcoded per-platform offsets.
     let work_area = monitor.work_area();
 
     Ok(ScreenGeometry {
@@ -100,9 +97,6 @@ pub fn apply_placement(window: &WebviewWindow, mode: PlacementMode) -> Result<()
             } else {
                 screen.x + screen.width - SIDEBAR_WIDTH
             };
-            // screen.x/y/width/height are already derived from the monitor's
-            // work area, so they exclude the menu bar / taskbar on every
-            // platform.  No additional offset is required.
             apply_window_props(
                 window, false, false, true,
                 LogicalSize::new(SIDEBAR_WIDTH, screen.height),
@@ -126,17 +120,17 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), AppError> {
         format!(".{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()),
     );
     std::fs::write(&temp_path, content)
-        .map_err(|e| AppError::Placement(format!("Failed to write temp state file: {}", e)))?;
+        .map_err(|e| AppError::Placement(format!("Failed to write temp state file: {e}")))?;
     std::fs::rename(&temp_path, path)
         .map_err(|e| {
             let _ = std::fs::remove_file(&temp_path);
-            AppError::Placement(format!("Failed to finalize state file: {}", e))
+            AppError::Placement(format!("Failed to finalize state file: {e}"))
         })
 }
 
 pub fn save_state(state: &PlacementState) -> Result<(), AppError> {
     let mode = state.mode.lock()
-        .map_err(|e| AppError::Placement(format!("Failed to lock placement state: {}", e)))?;
+        .map_err(|e| AppError::Placement(format!("Failed to lock placement state: {e}")))?;
     let json = serde_json::to_string(&*mode).map_err(placement_err)?;
     atomic_write(&state.state_file, &json)
 }
@@ -147,7 +141,6 @@ pub fn save_state_async(state: &PlacementState) {
     drop(guard);
 
     let state_file = state.state_file.clone();
-    // Use tokio's blocking thread pool instead of spawning a new OS thread per save.
     tauri::async_runtime::spawn_blocking(move || {
         let Ok(json) = serde_json::to_string(&mode) else {
             error!("Failed to serialize placement state");

@@ -3,15 +3,17 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "inputs": ["src/**", "tsconfig.json", "vite.config.*", "wrangler.*"],
       "outputs": ["dist/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
     },
     "check-types": {
       "dependsOn": ["^build"],
-      "outputs": []
-    },
-    "check": {
-      "dependsOn": ["^build"],
-      "outputs": []
+      "inputs": ["src/**", "tsconfig.json"],
+      "outputs": ["tsconfig.tsbuildinfo"]
     }
   }
 }

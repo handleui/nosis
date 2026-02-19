@@ -1,24 +1,41 @@
 # Muppet
 
-Tauri 2 desktop AI chat client for macOS. Rust backend, Svelte frontend (planned).
+Tauri 2 desktop AI chat client for macOS. Turborepo monorepo with Rust backend, Svelte frontend (planned).
 
 ## Build
 
 ```bash
-bun install
-bun run tauri dev     # dev mode
-bun run tauri build   # production
+bun install              # install all workspace deps
+bun run build            # build all apps via turbo
+bun run dev              # dev all apps via turbo
+
+# Single app:
+turbo run dev --filter=muppet-desktop
+turbo run dev --filter=muppet-worker
+
+# Tauri desktop specifically:
+cd apps/desktop && bun run tauri dev
+cd apps/desktop && bun run tauri build
 ```
 
-Rust backend compiles on `cargo tauri dev` automatically. Frontend is Vite on port 1420.
+Rust backend compiles on `tauri dev` automatically. Frontend is Vite on port 1420.
 
 ## Project Structure
 
-- `src-tauri/src/lib.rs` — Tauri app builder, plugin init, DB pool setup
-- `src-tauri/src/db.rs` — Versioned migration runner
-- `src-tauri/src/error.rs` — `AppError` enum (thiserror-based, Serialize for IPC)
-- `src-tauri/src/commands.rs` — All IPC command handlers
-- `src/` — Frontend (Svelte + TypeScript, minimal for now)
+- `apps/desktop/` — Tauri desktop app (frontend + Rust backend)
+  - `apps/desktop/src/` — Frontend (Svelte + TypeScript, minimal for now)
+  - `apps/desktop/src-tauri/src/lib.rs` — Tauri app builder, plugin init, DB pool setup
+  - `apps/desktop/src-tauri/src/db.rs` — Versioned migration runner
+  - `apps/desktop/src-tauri/src/error.rs` — `AppError` enum (thiserror-based, Serialize for IPC)
+  - `apps/desktop/src-tauri/src/commands.rs` — All IPC command handlers
+  - `apps/desktop/src-tauri/src/exa.rs` — Exa AI web search integration
+  - `apps/desktop/src-tauri/src/placement.rs` — Window placement modes
+  - `apps/desktop/src-tauri/src/supermemory.rs` — Supermemory persistent chat memory
+  - `apps/desktop/src-tauri/src/vault.rs` — Stronghold vault helpers
+- `apps/worker/` — Cloudflare Workers API (Hono)
+  - `apps/worker/src/index.ts` — Hono app with CORS, health endpoint
+  - `apps/worker/wrangler.jsonc` — Wrangler config
+- `packages/` — Shared libraries (future)
 
 See `ARCHITECTURE.md` for full details.
 

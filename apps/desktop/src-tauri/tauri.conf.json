@@ -29,9 +29,7 @@
     "icon": []
   },
   "plugins": {
-    "stronghold": {
-      "maxAge": null
-    },
+    "stronghold": {},
     "global-shortcut": {}
   }
 }

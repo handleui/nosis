@@ -7,16 +7,18 @@ node_modules
 # Build outputs
 dist
 target
+*.tsbuildinfo
 
 # Env files
 .env
 .env.*
 
-# Rust
-src-tauri/target
+# Rust / Tauri
+**/src-tauri/target
+**/src-tauri/gen
 
-# Tauri
-src-tauri/gen
+# Wrangler
+.wrangler
 
 # Debug
 *.log
@@ -24,6 +26,15 @@ src-tauri/gen
 # Misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.pfx
+
+# Secrets & credentials
+.dev.vars
+*.stronghold
+credentials.json
+service-account*.json
 
 # Context (conductor)
 .context
