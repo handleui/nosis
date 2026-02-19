@@ -246,6 +246,7 @@ pub fn run() {
             commands::list_mcp_servers,
             commands::delete_mcp_server,
             commands::start_oauth_callback_server,
+            commands::shutdown_oauth_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running muppet");

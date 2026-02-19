@@ -49,7 +49,7 @@ export async function createAgentForConversation(
     });
   } catch (err) {
     // Best-effort cleanup to avoid orphaned remote agents
-    await provider.client.agents.delete(agent.id).catch(() => {});
+    await provider.client.agents.delete(agent.id).catch(() => undefined);
     throw err;
   }
 

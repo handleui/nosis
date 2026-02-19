@@ -1344,6 +1344,15 @@ pub async fn start_oauth_callback_server(
     Ok(port)
 }
 
+#[tauri::command]
+pub fn shutdown_oauth_session(app: AppHandle, server_id: String) {
+    if let Ok(mut map) = app.state::<OAuthSessions>().0.lock() {
+        if let Some(handle) = map.remove(&server_id) {
+            handle.shutdown();
+        }
+    }
+}
+
 // ── Global Hotkey ──
 
 fn get_main_window(app_handle: &AppHandle) -> Option<tauri::WebviewWindow> {

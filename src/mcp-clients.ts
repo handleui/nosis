@@ -148,12 +148,14 @@ async function connectWithOAuth(server: McpServer): Promise<MCPClient> {
     const client = await createMCPClient({
       transport: { type: "http", url: server.url, authProvider },
     });
-    // Connected without needing the OAuth callback — clean up listeners
+    // Connected without needing the OAuth callback — clean up listeners and server
     cancelCodeWait();
+    invoke("shutdown_oauth_session", { serverId: server.id });
     return client;
   } catch (err) {
     if (!(err instanceof UnauthorizedError)) {
       cancelCodeWait();
+      invoke("shutdown_oauth_session", { serverId: server.id });
       throw err;
     }
   }
@@ -169,7 +171,7 @@ async function connectWithOAuth(server: McpServer): Promise<MCPClient> {
   });
 }
 
-async function connectServer(server: McpServer): Promise<MCPClient> {
+function connectServer(server: McpServer): Promise<MCPClient> {
   switch (server.auth_type) {
     case "api_key":
       return connectWithApiKey(server);

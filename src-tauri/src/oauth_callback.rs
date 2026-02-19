@@ -10,14 +10,19 @@ pub struct OAuthCodePayload {
 }
 
 /// Handle returned from `start_callback_server` to allow early shutdown.
+///
+/// Calling `shutdown()` sets the flag **and** unblocks the `recv_timeout`
+/// call so the background thread exits immediately and the port is released.
 #[derive(Clone)]
 pub struct OAuthSessionHandle {
     shutdown: Arc<AtomicBool>,
+    server: Arc<tiny_http::Server>,
 }
 
 impl OAuthSessionHandle {
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.server.unblock();
     }
 }
 
@@ -35,8 +40,10 @@ pub fn start_callback_server(
     timeout_secs: u64,
     expected_state: String,
 ) -> Result<(u16, OAuthSessionHandle), String> {
-    let server = tiny_http::Server::http("127.0.0.1:0")
-        .map_err(|e| format!("Failed to start OAuth callback server: {e}"))?;
+    let server = Arc::new(
+        tiny_http::Server::http("127.0.0.1:0")
+            .map_err(|e| format!("Failed to start OAuth callback server: {e}"))?,
+    );
 
     let port = server
         .server_addr()
@@ -47,6 +54,7 @@ pub fn start_callback_server(
     let shutdown = Arc::new(AtomicBool::new(false));
     let handle = OAuthSessionHandle {
         shutdown: Arc::clone(&shutdown),
+        server: Arc::clone(&server),
     };
 
     std::thread::spawn(move || {
