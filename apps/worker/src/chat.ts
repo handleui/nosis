@@ -257,11 +257,9 @@ export async function streamChat(
           });
           return result.text;
         } catch (err: unknown) {
-          console.error(
-            "Research tool error:",
-            sanitizeError(err, [lettaApiKey])
-          );
-          return "Research tool encountered an error and could not complete.";
+          const sanitized = sanitizeError(err, [lettaApiKey]);
+          console.error("Research tool error:", sanitized);
+          return `Research failed: ${sanitized}`;
         }
       },
     }),

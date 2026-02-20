@@ -142,6 +142,9 @@ export const messages = sqliteTable(
   ]
 );
 
+/** Tracks specialist agents per conversation+role.
+ *  The composite PK (conversation_id, role) doubles as an index covering
+ *  lookups by conversation_id alone (SQLite uses leftmost prefix). */
 export const conversationAgents = sqliteTable(
   "conversation_agents",
   {
