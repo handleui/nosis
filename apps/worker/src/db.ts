@@ -1,15 +1,79 @@
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { HTTPException } from "hono/http-exception";
-import { conversations, messages } from "./schema";
+import { conversations, messages, userApiKeys } from "./schema";
 import type * as schema from "./schema";
 import type { Conversation, Message } from "./types";
 
 export type AppDatabase = DrizzleD1Database<typeof schema>;
 export type MessageRole = (typeof messages.$inferInsert)["role"];
 
+export interface UserApiKeyMeta {
+  provider: string;
+  created_at: string;
+  updated_at: string;
+}
+
 function notFound(entity: string): never {
   throw new HTTPException(404, { message: `${entity} not found` });
+}
+
+// ── User API Keys ──
+
+export async function upsertUserApiKey(
+  db: AppDatabase,
+  userId: string,
+  provider: string,
+  encryptedKey: string
+): Promise<void> {
+  await db
+    .insert(userApiKeys)
+    .values({
+      user_id: userId,
+      provider,
+      encrypted_key: encryptedKey,
+    })
+    .onConflictDoUpdate({
+      target: [userApiKeys.user_id, userApiKeys.provider],
+      set: {
+        encrypted_key: encryptedKey,
+        updated_at: sql`datetime('now')`,
+      },
+    });
+}
+
+export function listUserApiKeys(
+  db: AppDatabase,
+  userId: string
+): Promise<UserApiKeyMeta[]> {
+  return db
+    .select({
+      provider: userApiKeys.provider,
+      created_at: userApiKeys.created_at,
+      updated_at: userApiKeys.updated_at,
+    })
+    .from(userApiKeys)
+    .where(eq(userApiKeys.user_id, userId))
+    .orderBy(asc(userApiKeys.provider));
+}
+
+export async function deleteUserApiKey(
+  db: AppDatabase,
+  userId: string,
+  provider: string
+): Promise<void> {
+  const result = await db
+    .delete(userApiKeys)
+    .where(
+      and(eq(userApiKeys.user_id, userId), eq(userApiKeys.provider, provider))
+    )
+    .returning({ user_id: userApiKeys.user_id });
+
+  if (result.length === 0) {
+    throw new HTTPException(404, {
+      message: `No API key configured for provider: ${provider}`,
+    });
+  }
 }
 
 // ── Conversations ──

@@ -1,5 +1,13 @@
 import { HTTPException } from "hono/http-exception";
 
+const MAX_API_KEY_LENGTH = 500;
+const MIN_API_KEY_LENGTH = 8;
+const VALID_PROVIDERS: ReadonlySet<string> = new Set([
+  "exa",
+  "firecrawl",
+  "letta",
+]);
+
 const MAX_TITLE_LENGTH = 500;
 const MAX_CONTENT_LENGTH = 100_000;
 const MAX_MODEL_LENGTH = 100;
@@ -154,4 +162,31 @@ function parsePageParam(
     badRequest(`${field} must be an integer`);
   }
   return n;
+}
+
+export type ApiProvider = "exa" | "firecrawl" | "letta";
+
+export function validateProvider(value: unknown): ApiProvider {
+  if (typeof value !== "string" || !VALID_PROVIDERS.has(value)) {
+    badRequest(
+      `Invalid provider: must be one of ${[...VALID_PROVIDERS].join(", ")}`
+    );
+  }
+  return value as ApiProvider;
+}
+
+export function validateApiKeyInput(value: unknown): string {
+  if (typeof value !== "string") {
+    badRequest("apiKey must be a string");
+  }
+  const trimmed = value.trim();
+  if (trimmed.length < MIN_API_KEY_LENGTH) {
+    badRequest(`apiKey must be at least ${MIN_API_KEY_LENGTH} characters`);
+  }
+  if (trimmed.length > MAX_API_KEY_LENGTH) {
+    badRequest(
+      `apiKey exceeds maximum length of ${MAX_API_KEY_LENGTH} characters`
+    );
+  }
+  return trimmed;
 }

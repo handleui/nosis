@@ -7,19 +7,24 @@ import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { createAuth } from "./auth";
 import { streamChat } from "./chat";
+import { encryptApiKey } from "./crypto";
 import {
   type AppDatabase,
   createConversation,
   deleteConversation,
+  deleteUserApiKey,
   getConversation,
   getMessages,
   listConversations,
+  listUserApiKeys,
   saveMessage,
   setConversationAgentId,
   updateConversationTitle,
+  upsertUserApiKey,
 } from "./db";
 import { searchExa, validateSearchRequest } from "./exa";
 import { scrapeUrl, validateScrapeRequest } from "./firecrawl";
+import { resolveUserApiKey } from "./keys";
 import {
   type AuthVariables,
   getUserId,
@@ -33,9 +38,11 @@ import type { Bindings } from "./types";
 import {
   parseJsonBody,
   validateAgentId,
+  validateApiKeyInput,
   validateContent,
   validateModel,
   validatePagination,
+  validateProvider,
   validateRole,
   validateTitle,
   validateTokenCount,
@@ -70,7 +77,7 @@ app.use(
       }
       return "";
     },
-    allowMethods: ["GET", "POST", "DELETE", "PATCH", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     maxAge: 86_400,
     credentials: false,
@@ -129,15 +136,57 @@ app.use(async (c, next) => {
 app.use("/api/*", sessionMiddleware);
 app.use("/api/*", requireAuth);
 
+// ── User API Keys (BYOK) ──
+
+app.put(
+  "/api/keys/:provider",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const provider = validateProvider(c.req.param("provider"));
+    const body = await parseJsonBody(c);
+    const apiKey = validateApiKeyInput(body.apiKey);
+
+    const encrypted = await encryptApiKey(
+      c.env.BETTER_AUTH_SECRET,
+      userId,
+      apiKey
+    );
+
+    await upsertUserApiKey(db(c.env), userId, provider, encrypted);
+    return c.json({ ok: true });
+  }
+);
+
+app.get("/api/keys", async (c) => {
+  const userId = getUserId(c);
+  const rows = await listUserApiKeys(db(c.env), userId);
+  return c.json(rows);
+});
+
+app.delete("/api/keys/:provider", async (c) => {
+  const userId = getUserId(c);
+  const provider = validateProvider(c.req.param("provider"));
+  await deleteUserApiKey(db(c.env), userId, provider);
+  return c.json({ ok: true });
+});
+
 // ── Exa Search ──
 
 app.post(
   "/api/search",
   bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
   async (c) => {
+    const userId = getUserId(c);
     const body = await parseJsonBody(c);
     const request = validateSearchRequest(body);
-    const results = await searchExa(c.env.EXA_API_KEY, request);
+    const apiKey = await resolveUserApiKey(
+      db(c.env),
+      c.env.BETTER_AUTH_SECRET,
+      userId,
+      "exa"
+    );
+    const results = await searchExa(apiKey, request);
     return c.json(results);
   }
 );
@@ -148,9 +197,16 @@ app.post(
   "/api/extract",
   bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
   async (c) => {
+    const userId = getUserId(c);
     const body = await parseJsonBody(c);
     const request = validateScrapeRequest(body);
-    const result = await scrapeUrl(c.env.FIRECRAWL_API_KEY, request);
+    const apiKey = await resolveUserApiKey(
+      db(c.env),
+      c.env.BETTER_AUTH_SECRET,
+      userId,
+      "firecrawl"
+    );
+    const result = await scrapeUrl(apiKey, request);
     return c.json(result);
   }
 );
@@ -284,9 +340,15 @@ app.post(
     const conversationId = validateUuid(c.req.param("id"));
     const body = await parseJsonBody(c);
     const content = validateContent(body.content);
+    const lettaApiKey = await resolveUserApiKey(
+      db(c.env),
+      c.env.BETTER_AUTH_SECRET,
+      userId,
+      "letta"
+    );
     return streamChat(
       db(c.env),
-      c.env.LETTA_API_KEY,
+      lettaApiKey,
       conversationId,
       userId,
       content,
@@ -307,7 +369,7 @@ app.onError((err, c) => {
     c.env.BETTER_AUTH_SECRET,
     c.env.GITHUB_CLIENT_ID,
     c.env.GITHUB_CLIENT_SECRET,
-  ] as const;
+  ].filter((s): s is string => Boolean(s));
 
   if (err instanceof HTTPException) {
     return c.json({ error: redactSecrets(err.message, secrets) }, err.status);

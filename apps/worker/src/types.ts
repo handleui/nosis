@@ -4,9 +4,9 @@ import type { conversations, messages } from "./schema";
 
 export interface Bindings {
   ENVIRONMENT?: string;
-  EXA_API_KEY: string;
-  FIRECRAWL_API_KEY: string;
-  LETTA_API_KEY: string;
+  EXA_API_KEY?: string;
+  FIRECRAWL_API_KEY?: string;
+  LETTA_API_KEY?: string;
   DB: D1Database;
   KV?: KVNamespace;
   BETTER_AUTH_SECRET: string;

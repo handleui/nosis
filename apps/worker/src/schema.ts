@@ -1,5 +1,11 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
 
 // ── Better Auth tables ──
 
@@ -82,6 +88,20 @@ export const conversations = sqliteTable(
     // Covers WHERE user_id = ? ORDER BY updated_at DESC (listConversations)
     index("idx_conversations_user_updated").on(table.user_id, table.updated_at),
   ]
+);
+
+export const userApiKeys = sqliteTable(
+  "user_api_keys",
+  {
+    user_id: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    encrypted_key: text("encrypted_key").notNull(),
+    created_at: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updated_at: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => [primaryKey({ columns: [table.user_id, table.provider] })]
 );
 
 export const messages = sqliteTable(

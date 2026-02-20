@@ -65,12 +65,6 @@ export async function streamChat(
   content: string,
   ctx: ExecutionContext
 ): Promise<Response> {
-  if (!lettaApiKey) {
-    throw new HTTPException(500, {
-      message: "Chat provider not configured",
-    });
-  }
-
   // Lightweight lookup — only fetches letta_agent_id, not the full conversation row
   const existingAgentId = await getConversationAgentId(
     db,
