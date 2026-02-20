@@ -32,23 +32,28 @@ Bypass portless with `PORTLESS=0 bun run dev`.
 ## Project Structure
 
 - `apps/desktop/` — Tauri desktop app (frontend + Rust backend)
-  - `apps/desktop/src/` — Frontend (Svelte + TypeScript, minimal for now)
+  - `apps/desktop/src/` — Frontend (TypeScript, minimal for now)
+  - `apps/desktop/src/main.ts` — Entry point, dev globals, Escape dismiss
+  - `apps/desktop/src/api.ts` — Worker API HTTP client (conversations, messages)
+  - `apps/desktop/src/mcp-clients.ts` — MCP client connections + tool discovery
+  - `apps/desktop/src/mcp-oauth.ts` — OAuth PKCE flow for MCP server auth
   - `apps/desktop/src-tauri/src/lib.rs` — Tauri app builder, plugin init, DB pool setup
   - `apps/desktop/src-tauri/src/db.rs` — Versioned migration runner
   - `apps/desktop/src-tauri/src/error.rs` — `AppError` enum (thiserror-based, Serialize for IPC)
-  - `apps/desktop/src-tauri/src/commands.rs` — All IPC command handlers
+  - `apps/desktop/src-tauri/src/commands.rs` — IPC commands (secrets, placement, arcade, MCP)
   - `apps/desktop/src-tauri/src/arcade.rs` — Arcade AI tool integration
-  - `apps/desktop/src-tauri/src/fal.rs` — Fal.ai image generation client
   - `apps/desktop/src-tauri/src/oauth_callback.rs` — OAuth callback server for MCP auth
   - `apps/desktop/src-tauri/src/placement.rs` — Window placement modes
-  - `apps/desktop/src-tauri/src/secrets.rs` — Encrypted secret store (replaces Stronghold vault)
-  - `apps/desktop/src-tauri/src/vault.rs` — Stronghold vault helpers
+  - `apps/desktop/src-tauri/src/secrets.rs` — Encrypted secret store (iota_stronghold)
+  - `apps/desktop/src-tauri/src/util.rs` — String utilities
 - `apps/worker/` — Cloudflare Workers API (Hono)
-  - `apps/worker/src/index.ts` — Hono app with CORS, health, and Exa search endpoint
-  - `apps/worker/src/exa.ts` — Exa AI web search validation and client
-  - `apps/worker/src/types.ts` — Shared TypeScript types for Exa search
+  - `apps/worker/src/index.ts` — Hono app with auth, CORS, all API routes
+  - `apps/worker/src/chat.ts` — AI streaming via Letta provider
+  - `apps/worker/src/db.ts` — D1 query functions (conversations, messages)
+  - `apps/worker/src/exa.ts` — Exa AI web search
+  - `apps/worker/src/firecrawl.ts` — Firecrawl URL extraction
   - `apps/worker/wrangler.jsonc` — Wrangler config
-- `packages/` — Shared libraries (future)
+- `packages/provider/` — `@nosis/provider` — Letta AI SDK wrapper
 
 See `ARCHITECTURE.md` for full details.
 
@@ -66,7 +71,8 @@ See `ARCHITECTURE.md` for full details.
 ### Frontend
 
 - Svelte with TypeScript — use `class` and `for` attributes (not `className`/`htmlFor`)
-- Call backend via `invoke()` from `@tauri-apps/api/core`
+- Call Worker API via `api.ts` HTTP client for data operations (conversations, messages)
+- Call Tauri backend via `invoke()` from `@tauri-apps/api/core` for desktop-only features (secrets, placement, MCP, arcade)
 
 ### General
 

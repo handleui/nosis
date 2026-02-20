@@ -13,9 +13,7 @@
     "fix": "ultracite fix"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.44",
     "@ai-sdk/mcp": "^1.0.21",
-    "@letta-ai/vercel-ai-sdk-provider": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-global-shortcut": "^2",

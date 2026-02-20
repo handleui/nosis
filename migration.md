@@ -116,9 +116,23 @@ Letta AI as the sole provider, streaming through the Worker. Agent-per-conversat
 - Frontend consuming Worker stream (Phase 5)
 - MCP tools on the Worker (future)
 
-## Phase 5: Shrink Rust
+## Phase 5: Shrink Rust ✓
 
-- Remove `commands.rs` CRUD, `streaming.ts`
-- Rust backend: ~150 lines (placement + hotkey + auth token in Stronghold)
-- `lib.rs` bootstraps Tauri with minimal plugins
-- CSP updated to allow Worker domain only
+Remove redundant CRUD and streaming code from the desktop app. Frontend switches from `invoke()` to HTTP calls for data operations.
+
+**Deliverables:**
+- Deleted `fal.rs` (image generation) and `vault.rs` (legacy Stronghold helpers)
+- Deleted `streaming.ts` (Anthropic AI streaming) and `letta.ts` (agent creation) from frontend
+- Pruned `commands.rs`: removed 15 CRUD/fal commands, kept 19 commands (secrets, placement, arcade, MCP, OAuth, hotkey)
+- Pruned `lib.rs`: removed fal key caching, shared HTTP client, simplified managed state
+- Pruned `error.rs`: removed 4 fal error variants and 3 helper functions
+- Created `api.ts` — typed HTTP client for Worker API (conversations, messages) with Bearer auth support
+- Updated `main.ts` — dev helpers now use `__nosis_api` for Worker calls, `__nosis_invoke` for Tauri-only commands
+- Cleaned CSP: removed fal.media domains from img-src, narrowed connect-src to `https://*.workers.dev`
+- Removed unused npm deps: `@ai-sdk/anthropic`, `@letta-ai/vercel-ai-sdk-provider`
+- Rust backend: ~1,400 lines (placement + hotkey + secrets + arcade + MCP + OAuth)
+- No Cargo.toml dep changes — all remaining deps still used by kept modules
+
+**Remaining (deferred to production deploy):**
+- Pin CSP `connect-src` from `https://*.workers.dev` to exact production Worker URL
+- Remove dev URL `http://nosis-api.localhost:1355` from production CSP (requires build-time CSP templating)

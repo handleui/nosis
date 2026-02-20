@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::arcade::{self, ArcadeClient};
 use crate::error::AppError;
-use crate::fal;
 use crate::oauth_callback::OAuthSessionHandle;
 use crate::placement::{self, PlacementMode, PlacementState};
 use crate::secrets::SecretStore;
@@ -12,57 +11,13 @@ use sqlx::{FromRow, Sqlite, SqlitePool};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
-use tracing::{error, info, instrument, warn};
-
-#[derive(Debug, Serialize, Deserialize, FromRow)]
-pub struct Conversation {
-    pub id: String,
-    pub title: String,
-    pub letta_agent_id: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, FromRow)]
-pub struct Message {
-    pub id: String,
-    pub conversation_id: String,
-    pub role: String,
-    pub content: String,
-    pub model: Option<String>,
-    pub tokens_in: Option<i64>,
-    pub tokens_out: Option<i64>,
-    pub created_at: String,
-}
-
-pub struct FalKeyCache(pub RwLock<Option<String>>);
-
-#[derive(Debug, Serialize, FromRow)]
-pub struct Generation {
-    pub id: String,
-    pub conversation_id: Option<String>,
-    pub model: String,
-    pub prompt: String,
-    pub image_url: String,
-    pub width: i64,
-    pub height: i64,
-    pub seed: Option<String>,
-    pub inference_time_ms: Option<f64>,
-    pub created_at: String,
-}
+use tracing::{error, info, instrument};
 
 /// Tracks active OAuth callback sessions so they can be shut down early.
 pub struct OAuthSessions(pub Mutex<HashMap<String, OAuthSessionHandle>>);
 
-const MAX_TITLE_LENGTH: usize = 500;
-const MAX_CONTENT_LENGTH: usize = 100_000;
-const MAX_MODEL_LENGTH: usize = 100;
 const MAX_API_KEY_LENGTH: usize = 500;
-const MAX_SETTING_KEY_LENGTH: usize = 255;
-const MAX_SETTING_VALUE_LENGTH: usize = 10_000;
 const MAX_PROVIDER_LENGTH: usize = 50;
-const DEFAULT_PAGE_SIZE: i32 = 100;
-const MAX_AGENT_ID_LENGTH: usize = 200;
 const MAX_ARCADE_API_KEY_LENGTH: usize = 256;
 const MAX_ARCADE_BASE_URL_LENGTH: usize = 500;
 const MAX_ARCADE_TOOLKIT_LENGTH: usize = 200;
@@ -79,40 +34,6 @@ fn validate_uuid(id: &str) -> Result<(), AppError> {
 
 fn validate_api_key(key: &str) -> Result<(), AppError> {
     validate_non_empty_bounded(key, MAX_API_KEY_LENGTH, "API key")
-}
-
-fn validate_title(title: &str) -> Result<(), AppError> {
-    validate_non_empty_bounded(title, MAX_TITLE_LENGTH, "Title")
-}
-
-fn validate_message_fields(
-    role: &str,
-    content: &str,
-    model: Option<&str>,
-    tokens_in: Option<i64>,
-    tokens_out: Option<i64>,
-) -> Result<(), AppError> {
-    if !matches!(role, "user" | "assistant" | "system") {
-        return Err(AppError::Validation(
-            "Invalid role: must be 'user', 'assistant', or 'system'".into(),
-        ));
-    }
-    validate_non_empty_bounded(content, MAX_CONTENT_LENGTH, "Content")?;
-    if let Some(m) = model {
-        if m.len() > MAX_MODEL_LENGTH {
-            return Err(AppError::Validation(format!(
-                "Model name exceeds maximum length of {} characters",
-                MAX_MODEL_LENGTH
-            )));
-        }
-    }
-    if matches!(tokens_in, Some(t) if t < 0) {
-        return Err(AppError::Validation("tokens_in must be non-negative".into()));
-    }
-    if matches!(tokens_out, Some(t) if t < 0) {
-        return Err(AppError::Validation("tokens_out must be non-negative".into()));
-    }
-    Ok(())
 }
 
 fn validate_identifier(
@@ -149,26 +70,8 @@ fn validate_non_empty_bounded(value: &str, max_len: usize, field: &str) -> Resul
     Ok(())
 }
 
-fn validate_agent_id(agent_id: &str) -> Result<(), AppError> {
-    validate_identifier(agent_id, MAX_AGENT_ID_LENGTH, "Agent ID", &['-', '_', '.', ':'])
-}
-
-fn validate_setting_key(key: &str) -> Result<(), AppError> {
-    validate_identifier(key, MAX_SETTING_KEY_LENGTH, "Setting key", &['-', '_', '.'])
-}
-
 fn validate_provider(provider: &str) -> Result<(), AppError> {
     validate_identifier(provider, MAX_PROVIDER_LENGTH, "Provider name", &['-', '_', ':'])
-}
-
-fn read_cache<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockReadGuard<'_, T>, AppError> {
-    lock.read()
-        .map_err(|_| AppError::Internal("Failed to acquire cache lock".into()))
-}
-
-fn write_cache<T>(lock: &RwLock<T>) -> Result<std::sync::RwLockWriteGuard<'_, T>, AppError> {
-    lock.write()
-        .map_err(|_| AppError::Internal("Failed to acquire cache lock".into()))
 }
 
 async fn blocking<F, T>(f: F) -> Result<T, AppError>
@@ -179,28 +82,6 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?
-}
-
-/// Allowlist (not suffix match) to block attacker-controlled subdomains.
-const TRUSTED_FAL_HOSTS: &[&str] = &["fal.media", "v2.fal.media", "v3.fal.media"];
-
-fn is_trusted_fal_image_url(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    if parsed.scheme() != "https" {
-        return false;
-    }
-    if parsed.port().is_some() {
-        return false;
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return false;
-    }
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    TRUSTED_FAL_HOSTS.contains(&host)
 }
 
 pub(crate) fn validate_base_url(url_str: &str) -> Result<(), AppError> {
@@ -296,251 +177,6 @@ fn get_secret_store(app: &AppHandle) -> Result<Arc<SecretStore>, AppError> {
     app.try_state::<Arc<SecretStore>>()
         .ok_or(AppError::SecretStore("secret store not initialized".into()))
         .map(|state| Arc::clone(state.inner()))
-}
-
-fn get_http_client(app: &AppHandle) -> Result<&reqwest::Client, AppError> {
-    app.try_state::<reqwest::Client>()
-        .ok_or(AppError::Internal("HTTP client not initialized".into()))
-        .map(|state| state.inner())
-}
-
-fn get_fal_key_cache(app: &AppHandle) -> Result<&FalKeyCache, AppError> {
-    app.try_state::<FalKeyCache>()
-        .ok_or(AppError::Internal("API key cache not initialized".into()))
-        .map(|state| state.inner())
-}
-
-// ── Conversation Commands ──
-
-#[tauri::command]
-pub async fn create_conversation(
-    app: AppHandle,
-    title: Option<String>,
-) -> Result<Conversation, AppError> {
-    if let Some(ref t) = title {
-        validate_title(t)?;
-    }
-    let title = title.unwrap_or_else(|| "New Conversation".to_string());
-
-    let pool = get_pool(&app)?;
-    let id = gen_id();
-
-    Ok(sqlx::query_as::<Sqlite, Conversation>(
-        "INSERT INTO conversations (id, title) VALUES (?, ?)
-         RETURNING id, title, letta_agent_id, created_at, updated_at",
-    )
-    .bind(&id)
-    .bind(&title)
-    .fetch_one(pool)
-    .await?)
-}
-
-#[tauri::command]
-pub async fn list_conversations(
-    app: AppHandle,
-    limit: Option<i32>,
-    offset: Option<i32>,
-) -> Result<Vec<Conversation>, AppError> {
-    let pool = get_pool(&app)?;
-    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
-    let offset = offset.unwrap_or(0).max(0);
-
-    Ok(sqlx::query_as::<Sqlite, Conversation>(
-        "SELECT id, title, letta_agent_id, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?)
-}
-
-#[tauri::command]
-pub async fn update_conversation_title(
-    app: AppHandle,
-    id: String,
-    title: String,
-) -> Result<(), AppError> {
-    validate_uuid(&id)?;
-    validate_title(&title)?;
-
-    let pool = get_pool(&app)?;
-    let result = sqlx::query("UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ?")
-        .bind(&title)
-        .bind(&id)
-        .execute(pool)
-        .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Conversation"));
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn delete_conversation(app: AppHandle, id: String) -> Result<(), AppError> {
-    validate_uuid(&id)?;
-    let pool = get_pool(&app)?;
-    let result = sqlx::query("DELETE FROM conversations WHERE id = ?")
-        .bind(&id)
-        .execute(pool)
-        .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Conversation"));
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn get_conversation(
-    app: AppHandle,
-    id: String,
-) -> Result<Conversation, AppError> {
-    validate_uuid(&id)?;
-    let pool = get_pool(&app)?;
-
-    sqlx::query_as::<Sqlite, Conversation>(
-        "SELECT id, title, letta_agent_id, created_at, updated_at FROM conversations WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or(AppError::NotFound("Conversation"))
-}
-
-// ── Message Commands ──
-
-#[tauri::command]
-pub async fn get_messages(
-    app: AppHandle,
-    conversation_id: String,
-    limit: Option<i32>,
-    offset: Option<i32>,
-) -> Result<Vec<Message>, AppError> {
-    validate_uuid(&conversation_id)?;
-    let pool = get_pool(&app)?;
-    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
-    let offset = offset.unwrap_or(0).max(0);
-
-    Ok(sqlx::query_as::<Sqlite, Message>(
-        "SELECT id, conversation_id, role, content, model, tokens_in, tokens_out, created_at
-         FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
-    )
-    .bind(&conversation_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?)
-}
-
-#[tauri::command]
-pub async fn save_message(
-    app: AppHandle,
-    conversation_id: String,
-    role: String,
-    content: String,
-    model: Option<String>,
-    tokens_in: Option<i64>,
-    tokens_out: Option<i64>,
-) -> Result<Message, AppError> {
-    validate_uuid(&conversation_id)?;
-    validate_message_fields(&role, &content, model.as_deref(), tokens_in, tokens_out)?;
-
-    let pool = get_pool(&app)?;
-    let id = gen_id();
-    let mut tx = pool.begin().await?;
-
-    let update_result = sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
-        .bind(&conversation_id)
-        .execute(&mut *tx)
-        .await?;
-
-    if update_result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Conversation"));
-    }
-
-    let message = sqlx::query_as::<Sqlite, Message>(
-        "INSERT INTO messages (id, conversation_id, role, content, model, tokens_in, tokens_out)
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id, conversation_id, role, content, model, tokens_in, tokens_out, created_at",
-    )
-    .bind(&id)
-    .bind(&conversation_id)
-    .bind(&role)
-    .bind(&content)
-    .bind(&model)
-    .bind(tokens_in)
-    .bind(tokens_out)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(message)
-}
-
-// ── Settings Commands ──
-
-#[tauri::command]
-#[instrument(skip(app))]
-pub async fn get_setting(app: AppHandle, key: String) -> Result<Option<String>, AppError> {
-    validate_setting_key(&key)?;
-
-    let pool = get_pool(&app)?;
-    Ok(sqlx::query_scalar::<Sqlite, String>("SELECT value FROM settings WHERE key = ?")
-        .bind(&key)
-        .fetch_optional(pool)
-        .await?)
-}
-
-#[tauri::command]
-#[instrument(skip(app, value))]
-pub async fn set_setting(app: AppHandle, key: String, value: String) -> Result<(), AppError> {
-    validate_setting_key(&key)?;
-    if value.len() > MAX_SETTING_VALUE_LENGTH {
-        return Err(AppError::Validation(format!(
-            "Setting value exceeds maximum length of {} characters",
-            MAX_SETTING_VALUE_LENGTH
-        )));
-    }
-
-    let pool = get_pool(&app)?;
-    sqlx::query(
-        "INSERT INTO settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-    )
-    .bind(&key)
-    .bind(&value)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-// ── Letta Agent Commands ──
-
-#[tauri::command]
-pub async fn set_conversation_agent_id(
-    app: AppHandle,
-    conversation_id: String,
-    agent_id: String,
-) -> Result<(), AppError> {
-    validate_uuid(&conversation_id)?;
-    validate_agent_id(&agent_id)?;
-
-    let pool = get_pool(&app)?;
-    let result = sqlx::query(
-        "UPDATE conversations SET letta_agent_id = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(&agent_id)
-    .bind(&conversation_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Conversation"));
-    }
-    Ok(())
 }
 
 // ── Placement Commands ──
@@ -647,95 +283,6 @@ pub async fn delete_api_key(
     blocking(move || store.remove(&store_key)).await?;
 
     info!(provider = %provider, "deleted API key");
-    Ok(())
-}
-
-// ── Fal.ai API Key Commands ──
-
-#[tauri::command]
-#[instrument(skip(app, key))]
-pub async fn store_fal_api_key(app: AppHandle, key: String) -> Result<(), AppError> {
-    validate_api_key(&key)?;
-    let store = get_secret_store(&app)?;
-    let key_bytes = key.as_bytes().to_vec();
-    blocking(move || store.insert("fal_api_key", key_bytes)).await?;
-    *write_cache(&get_fal_key_cache(&app)?.0)? = Some(key);
-    info!("stored fal API key");
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn has_fal_api_key(app: AppHandle) -> Result<bool, AppError> {
-    Ok(read_cache(&get_fal_key_cache(&app)?.0)?.is_some())
-}
-
-#[tauri::command]
-#[instrument(skip(app))]
-pub async fn delete_fal_api_key(app: AppHandle) -> Result<(), AppError> {
-    let store = get_secret_store(&app)?;
-    blocking(move || store.remove("fal_api_key")).await?;
-    *write_cache(&get_fal_key_cache(&app)?.0)? = None;
-    info!("deleted fal API key");
-    Ok(())
-}
-
-// ── Image Generation Commands ──
-
-fn validate_image_urls(response: &fal::ImageGenerationResponse) -> Result<(), AppError> {
-    for image in &response.images {
-        if !is_trusted_fal_image_url(&image.url) {
-            warn!(
-                url_len = image.url.len(),
-                "fal.ai: rejecting image URL from untrusted domain"
-            );
-            return Err(AppError::Validation(
-                "Image generation returned an unexpected URL".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn persist_generations(
-    pool: &SqlitePool,
-    response: &fal::ImageGenerationResponse,
-    conversation_id: &Option<String>,
-    model: &fal::FalModel,
-    prompt: &str,
-) -> Result<(), AppError> {
-    if response.images.is_empty() {
-        return Ok(());
-    }
-
-    let inference_time_ms = response
-        .timings
-        .as_ref()
-        .and_then(|t| t.inference)
-        .map(|secs| secs * 1000.0);
-    let seed = response.seed.map(|s| s.to_string());
-    let model_str = model.as_path();
-
-    let mut tx = pool.begin().await?;
-
-    for image in &response.images {
-        sqlx::query(
-            "INSERT INTO generations (id, conversation_id, model, prompt, image_url, width, height, seed, inference_time_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(gen_id())
-        .bind(conversation_id)
-        .bind(model_str)
-        .bind(prompt)
-        .bind(&image.url)
-        .bind(i64::from(image.width))
-        .bind(i64::from(image.height))
-        .bind(seed.as_deref())
-        .bind(inference_time_ms)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
     Ok(())
 }
 
@@ -897,7 +444,10 @@ pub struct AuthorizeResult {
 fn open_auth_url_if_valid(app: &AppHandle, url_str: Option<&str>) {
     let Some(url_str) = url_str else { return };
     let Ok(parsed) = url::Url::parse(url_str) else { return };
-    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+    // Only open HTTPS URLs — reject http, javascript, file, and other schemes
+    // to prevent Arcade API responses from opening arbitrary local or insecure URLs.
+    if parsed.scheme() != "https" {
+        error!(scheme = parsed.scheme(), "refused to open non-HTTPS authorization URL");
         return;
     }
     if let Err(e) = app.opener().open_url(url_str, None::<&str>) {
@@ -974,81 +524,6 @@ pub async fn arcade_execute_tool(
     }
     let client = get_arcade_client(&app)?;
     Ok(client.execute_tool(&tool_name, input).await?)
-}
-
-// ── Image Generation Commands ──
-
-#[tauri::command]
-#[instrument(skip(app))]
-pub async fn generate_image(
-    app: AppHandle,
-    prompt: String,
-    model: Option<fal::FalModel>,
-    image_size: Option<fal::ImageSizePreset>,
-    num_inference_steps: Option<u32>,
-    conversation_id: Option<String>,
-) -> Result<fal::ImageGenerationResponse, AppError> {
-    if let Some(ref cid) = conversation_id {
-        validate_uuid(cid)?;
-    }
-
-    let model = model.unwrap_or(fal::FalModel::FluxSchnell);
-    let request = fal::ImageGenerationRequest {
-        prompt,
-        image_size,
-        num_inference_steps,
-    };
-    fal::validate_generation_request(&request)?;
-
-    let api_key = read_cache(&get_fal_key_cache(&app)?.0)?
-        .clone()
-        .ok_or(AppError::ApiKeyNotConfigured)?;
-
-    let http = get_http_client(&app)?;
-    let response = fal::FalClient::new(http, &api_key)
-        .generate_image(&model, &request)
-        .await?;
-
-    validate_image_urls(&response)?;
-    persist_generations(get_pool(&app)?, &response, &conversation_id, &model, &request.prompt).await?;
-
-    Ok(response)
-}
-
-#[tauri::command]
-#[instrument(skip(app))]
-pub async fn list_generations(
-    app: AppHandle,
-    conversation_id: Option<String>,
-    limit: Option<i32>,
-    offset: Option<i32>,
-) -> Result<Vec<Generation>, AppError> {
-    if let Some(ref cid) = conversation_id {
-        validate_uuid(cid)?;
-    }
-
-    let pool = get_pool(&app)?;
-    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 500);
-    let offset = offset.unwrap_or(0).max(0);
-
-    let (sql, filter_id) = match conversation_id {
-        Some(ref cid) => (
-            "SELECT id, conversation_id, model, prompt, image_url, width, height, seed, inference_time_ms, created_at
-             FROM generations WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            Some(cid.as_str()),
-        ),
-        None => (
-            "SELECT id, conversation_id, model, prompt, image_url, width, height, seed, inference_time_ms, created_at
-             FROM generations ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            None,
-        ),
-    };
-
-    let mut query = sqlx::query_as::<Sqlite, Generation>(sql);
-    if let Some(cid) = filter_id {
-        query = query.bind(cid);
-    }
-    Ok(query.bind(limit).bind(offset).fetch_all(pool).await?)
 }
 
 // ── MCP Server Commands ──
@@ -1244,6 +719,14 @@ pub async fn start_oauth_callback_server(
             "OAuth state parameter contains invalid characters".into(),
         ));
     }
+
+    // Validate server_id is a proper UUID before using it as a map key.
+    // An unvalidated server_id could be used to shadow or evict an existing
+    // session handle for a different server.
+    if let Some(ref id) = server_id {
+        validate_uuid(id)?;
+    }
+
     let (port, handle) =
         crate::oauth_callback::start_callback_server(app.clone(), 300, expected_state)
             .map_err(AppError::Internal)?;
@@ -1259,12 +742,14 @@ pub async fn start_oauth_callback_server(
 }
 
 #[tauri::command]
-pub fn shutdown_oauth_session(app: AppHandle, server_id: String) {
+pub fn shutdown_oauth_session(app: AppHandle, server_id: String) -> Result<(), AppError> {
+    validate_uuid(&server_id)?;
     if let Ok(mut map) = app.state::<OAuthSessions>().0.lock() {
         if let Some(handle) = map.remove(&server_id) {
             handle.shutdown();
         }
     }
+    Ok(())
 }
 
 // ── Global Hotkey ──

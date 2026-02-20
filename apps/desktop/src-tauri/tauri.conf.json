@@ -10,7 +10,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://fal.media https://v2.fal.media https://v3.fal.media; connect-src ipc: http://ipc.localhost https://api.letta.com https://api.anthropic.com https://* http://127.0.0.1:* 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost https://*.workers.dev http://nosis-api.localhost:1355 http://127.0.0.1:* 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
     },
     "windows": [
       {

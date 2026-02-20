@@ -56,7 +56,7 @@ fn versioned_migrations() -> Vec<(i64, Vec<&'static str>)> {
             "DROP INDEX IF EXISTS idx_generations_conv",
             "CREATE INDEX IF NOT EXISTS idx_generations_conv_created ON generations(conversation_id, created_at)",
         ]),
-        // Store seed as TEXT to preserve full u64 range from fal.ai.
+        // Store seed as TEXT to preserve full u64 range (SQLite INTEGER is signed 64-bit).
         (6, vec![
             "ALTER TABLE generations RENAME TO generations_old",
             "CREATE TABLE generations (
