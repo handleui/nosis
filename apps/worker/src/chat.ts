@@ -196,6 +196,12 @@ export async function streamChat(
   // Request-scoped counter: prevents resource exhaustion from unbounded tool calls.
   let researchCallCount = 0;
 
+  if ("research" in mcpTools) {
+    console.warn(
+      `[chat] MCP tool named "research" will be overridden by the built-in research tool [conversation=${conversationId}]`
+    );
+  }
+
   const tools = {
     ...mcpTools,
     research: tool({
