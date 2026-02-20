@@ -2,6 +2,9 @@ import { HTTPException } from "hono/http-exception";
 
 const ALGORITHM = "AES-GCM";
 const IV_BYTES = 12;
+const GCM_TAG_BYTES = 16;
+/** Minimum raw ciphertext length: IV + at least 1 plaintext byte + GCM auth tag. */
+const MIN_ENCRYPTED_BYTES = IV_BYTES + 1 + GCM_TAG_BYTES;
 const KEY_USAGE: string[] = ["encrypt", "decrypt"];
 const MIN_SECRET_LENGTH = 32;
 
@@ -71,6 +74,9 @@ export async function decryptApiKey(
 
   try {
     const raw = Uint8Array.from(atob(encrypted), (c) => c.charCodeAt(0));
+    if (raw.byteLength < MIN_ENCRYPTED_BYTES) {
+      throw new Error("Ciphertext too short");
+    }
     const iv = raw.slice(0, IV_BYTES);
     const ciphertext = raw.slice(IV_BYTES);
     const decrypted = await crypto.subtle.decrypt(

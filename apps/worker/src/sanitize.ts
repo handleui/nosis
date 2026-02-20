@@ -1,4 +1,5 @@
-const API_KEY_PATTERN = /\b(sk-ant-|sk-)[A-Za-z0-9_-]{10,}\b/g;
+const API_KEY_PATTERN =
+  /\b(sk-ant-|sk-|exa-|fc-|key-|letta-)[A-Za-z0-9_-]{8,}\b/g;
 const LONG_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{40,}\b/g;
 const MAX_SANITIZED_LENGTH = 500;
 

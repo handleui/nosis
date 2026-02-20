@@ -90,7 +90,7 @@ export function validateContent(value: unknown): string {
 }
 
 export function validateModel(value: unknown): string | undefined {
-  if (value === undefined || value === null) {
+  if (value == null) {
     return undefined;
   }
   if (typeof value !== "string") {
@@ -108,7 +108,7 @@ export function validateTokenCount(
   value: unknown,
   field: string
 ): number | undefined {
-  if (value === undefined || value === null) {
+  if (value == null) {
     return undefined;
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
@@ -154,7 +154,7 @@ function parsePageParam(
   field: string,
   defaultValue: number
 ): number {
-  if (value === undefined || value === null) {
+  if (value == null) {
     return defaultValue;
   }
   const n = Number(value);

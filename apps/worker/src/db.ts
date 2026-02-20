@@ -1,7 +1,13 @@
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { HTTPException } from "hono/http-exception";
-import { conversations, mcpServers, messages, userApiKeys } from "./schema";
+import {
+  conversationAgents,
+  conversations,
+  mcpServers,
+  messages,
+  userApiKeys,
+} from "./schema";
 import type * as schema from "./schema";
 import type { Conversation, McpServer, Message } from "./types";
 
@@ -70,9 +76,7 @@ export async function deleteUserApiKey(
     .returning({ user_id: userApiKeys.user_id });
 
   if (result.length === 0) {
-    throw new HTTPException(404, {
-      message: `No API key configured for provider: ${provider}`,
-    });
+    notFound(`API key for provider "${provider}"`);
   }
 }
 
@@ -270,6 +274,79 @@ export async function getConversationAgentId(
   return row.letta_agent_id;
 }
 
+// ── Conversation Agents ──
+
+/**
+ * Return the Letta agent ID for a specialist role, or null if not yet created.
+ * Scoped to userId via a join on conversations to prevent cross-user IDOR.
+ */
+export async function getConversationAgent(
+  db: AppDatabase,
+  conversationId: string,
+  userId: string,
+  role: string
+): Promise<string | null> {
+  const row = await db
+    .select({ letta_agent_id: conversationAgents.letta_agent_id })
+    .from(conversationAgents)
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.id, conversationAgents.conversation_id),
+        eq(conversations.user_id, userId)
+      )
+    )
+    .where(
+      and(
+        eq(conversationAgents.conversation_id, conversationId),
+        eq(conversationAgents.role, role)
+      )
+    )
+    .get();
+  return row?.letta_agent_id ?? null;
+}
+
+/**
+ * Insert a specialist agent ID for a role only if not already set.
+ * Verifies conversation ownership (userId) before inserting to prevent cross-user IDOR.
+ * Returns true if this call won the race; false if the user doesn't own the conversation
+ * or another request already inserted a row for this role.
+ */
+export async function trySetConversationAgent(
+  db: AppDatabase,
+  conversationId: string,
+  userId: string,
+  role: string,
+  agentId: string
+): Promise<boolean> {
+  const owned = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.user_id, userId)
+      )
+    )
+    .get();
+
+  if (!owned) {
+    return false;
+  }
+
+  const inserted = await db
+    .insert(conversationAgents)
+    .values({
+      conversation_id: conversationId,
+      role,
+      letta_agent_id: agentId,
+    })
+    .onConflictDoNothing()
+    .returning({ conversation_id: conversationAgents.conversation_id });
+
+  return inserted.length > 0;
+}
+
 // ── Messages ──
 
 export async function getMessages(
@@ -327,9 +404,10 @@ export async function saveMessage(
         eq(conversations.id, conversationId),
         eq(conversations.user_id, userId)
       )
-    );
+    )
+    .get();
 
-  if (convCheck.length === 0) {
+  if (!convCheck) {
     notFound("Conversation");
   }
 
@@ -360,7 +438,13 @@ export async function saveMessage(
   return row;
 }
 
-/** Insert a message without the conversation-existence check. */
+/** Insert a message without a conversation-ownership check.
+ *  SECURITY: Callers MUST verify conversation ownership before calling.
+ *  Used only from streamChat() for the post-stream assistant-message save,
+ *  where ownership was already validated by getConversationAgentId().
+ *  Skips `.returning()` to avoid sending the (potentially large) content
+ *  column back over the D1 wire — no caller uses the returned row.
+ */
 export async function saveMessageBatch(
   db: AppDatabase,
   id: string,
@@ -370,29 +454,71 @@ export async function saveMessageBatch(
   model: string | null,
   tokensIn: number,
   tokensOut: number
-): Promise<Message> {
-  const [, inserted] = await db.batch([
+): Promise<void> {
+  await db.batch([
     db
       .update(conversations)
       .set({ updated_at: sql`datetime('now')` })
       .where(eq(conversations.id, conversationId)),
+    db.insert(messages).values({
+      id,
+      conversation_id: conversationId,
+      role,
+      content,
+      model,
+      tokens_in: tokensIn,
+      tokens_out: tokensOut,
+    }),
+  ]);
+}
+
+/**
+ * Fetch the agent ID for a conversation AND save a user message atomically.
+ * Ownership is verified first via a standalone SELECT — only if that passes
+ * are the UPDATE (touch updated_at) and INSERT (user message) batched together.
+ *
+ * Throws 404 if the conversation doesn't exist or isn't owned by userId.
+ */
+export async function getAgentIdAndSaveMessage(
+  db: AppDatabase,
+  conversationId: string,
+  userId: string,
+  messageId: string,
+  content: string
+): Promise<string | null> {
+  // Verify ownership first — D1 batch() executes all statements unconditionally,
+  // so we must confirm ownership in a standalone query before running any writes.
+  const agentRow = await db
+    .select({ letta_agent_id: conversations.letta_agent_id })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.user_id, userId)
+      )
+    )
+    .get();
+
+  if (!agentRow) {
+    notFound("Conversation");
+  }
+
+  // Ownership confirmed — batch the UPDATE + INSERT together.
+  await db.batch([
     db
-      .insert(messages)
-      .values({
-        id,
-        conversation_id: conversationId,
-        role,
-        content,
-        model,
-        tokens_in: tokensIn,
-        tokens_out: tokensOut,
-      })
-      .returning(),
+      .update(conversations)
+      .set({ updated_at: sql`datetime('now')` })
+      .where(eq(conversations.id, conversationId)),
+    db.insert(messages).values({
+      id: messageId,
+      conversation_id: conversationId,
+      role: "user",
+      content,
+      model: null,
+      tokens_in: 0,
+      tokens_out: 0,
+    }),
   ]);
 
-  const row = inserted[0];
-  if (!row) {
-    throw new HTTPException(500, { message: "Failed to save message" });
-  }
-  return row;
+  return agentRow.letta_agent_id;
 }

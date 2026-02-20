@@ -128,7 +128,9 @@ app.get("/migrate", async (c) => {
 // Reject non-JSON content types on mutation requests (CSRF defense)
 app.use(async (c, next) => {
   const method = c.req.method;
-  if (method === "POST" || method === "PATCH" || method === "PUT") {
+  const isMutation =
+    method === "POST" || method === "PATCH" || method === "PUT";
+  if (isMutation) {
     const ct = c.req.header("content-type") ?? "";
     if (!ct.startsWith("application/json")) {
       throw new HTTPException(415, {
@@ -461,14 +463,15 @@ app.post(
     const conversationId = validateUuid(c.req.param("id"));
     const body = await parseJsonBody(c);
     const content = validateContent(body.content);
+    const d = db(c.env);
     const lettaApiKey = await resolveUserApiKey(
-      db(c.env),
+      d,
       c.env.BETTER_AUTH_SECRET,
       userId,
       "letta"
     );
     return streamChat(
-      db(c.env),
+      d,
       lettaApiKey,
       conversationId,
       userId,

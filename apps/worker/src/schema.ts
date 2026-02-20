@@ -141,3 +141,16 @@ export const messages = sqliteTable(
     ),
   ]
 );
+
+export const conversationAgents = sqliteTable(
+  "conversation_agents",
+  {
+    conversation_id: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    letta_agent_id: text("letta_agent_id").notNull(),
+    created_at: text("created_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => [primaryKey({ columns: [table.conversation_id, table.role] })]
+);
