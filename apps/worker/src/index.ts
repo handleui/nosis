@@ -71,7 +71,8 @@ app.use(
       }
       if (
         c.env.ENVIRONMENT === "development" &&
-        origin === "http://localhost:1420"
+        (origin === "http://localhost:1420" ||
+          origin === "http://localhost:3000")
       ) {
         return origin;
       }
@@ -80,7 +81,7 @@ app.use(
     allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     maxAge: 86_400,
-    credentials: false,
+    credentials: true,
   })
 );
 

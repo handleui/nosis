@@ -136,3 +136,27 @@ Remove redundant CRUD and streaming code from the desktop app. Frontend switches
 **Remaining (deferred to production deploy):**
 - Pin CSP `connect-src` from `https://*.workers.dev` to exact production Worker URL
 - Remove dev URL `http://nosis-api.localhost:1355` from production CSP (requires build-time CSP templating)
+
+## Phase 6: BYOK + Web Auth ✓
+
+Bring-your-own-key (BYOK) encrypted API key management and a Next.js web client with authentication.
+
+**BYOK (Worker):**
+- `crypto.ts` — AES-256-GCM encryption using HKDF-derived per-user keys (salt: `nosis-user-api-keys-v1`, info scoped to userId)
+- `keys.ts` — `resolveUserApiKey()` decrypts stored key at request time; used by `/api/search`, `/api/extract`, `/api/conversations/:id/chat`
+- `db.ts` — `upsertUserApiKey`, `listUserApiKeys`, `deleteUserApiKey` (D1 `user_api_keys` table)
+- `validate.ts` — `validateProvider` (letta/exa/firecrawl enum), `validateApiKeyInput`
+- 3 new endpoints:
+  - `PUT /api/keys/:provider` — encrypt + upsert key
+  - `GET /api/keys` — list configured providers (no secrets returned)
+  - `DELETE /api/keys/:provider` — remove key
+- CORS updated: `credentials: true`, `localhost:3000` allowed in development
+
+**Web Client (`apps/web/`):**
+- Next.js 16 / React 19 app with Better Auth (GitHub OAuth)
+- `lib/auth-client.ts` — Better Auth React client with cookie credentials
+- `components/auth-guard.tsx` — session-gated wrapper, redirects to `/sign-in`
+- `app/sign-in/page.tsx` — GitHub OAuth sign-in
+- `app/onboarding/page.tsx` — BYOK key entry form (Letta, Exa, Firecrawl)
+- `app/(chat)/` — authenticated chat layout with sidebar
+- `app/code/` — code mode layout

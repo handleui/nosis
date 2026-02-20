@@ -1,6 +1,6 @@
 # Nosis Architecture
 
-Aggressively performant AI chat client for macOS. Turborepo monorepo with a Tauri 2 desktop app (Rust backend + Svelte frontend planned) and a Cloudflare Workers API.
+Aggressively performant AI chat client for macOS. Turborepo monorepo with a Tauri 2 desktop app (Rust backend + Svelte frontend planned), a Next.js web client, and a Cloudflare Workers API.
 
 ## Directory Layout
 
@@ -32,14 +32,29 @@ nosis/
 │   │   ├── package.json        # Desktop app deps + scripts
 │   │   ├── vite.config.ts      # Vite dev server + build config
 │   │   └── tsconfig.json       # TypeScript config
+│   ├── web/                   # Next.js web client (React)
+│   │   └── src/
+│   │       ├── app/
+│   │       │   ├── (chat)/          # Authenticated chat routes (layout + pages)
+│   │       │   ├── code/            # Code mode routes
+│   │       │   ├── sign-in/page.tsx # GitHub OAuth sign-in
+│   │       │   └── onboarding/page.tsx # BYOK API key setup
+│   │       ├── components/
+│   │       │   ├── auth-guard.tsx   # Session guard — redirects to /sign-in
+│   │       │   ├── mode-switcher.tsx
+│   │       │   └── resizable-grid.tsx
+│   │       └── lib/
+│   │           └── auth-client.ts   # Better Auth React client
 │   └── worker/                # Cloudflare Workers API
 │       ├── src/
 │       │   ├── index.ts       # Hono app — routes, CORS, auth, body limits
 │       │   ├── auth.ts        # Better Auth setup
 │       │   ├── chat.ts        # AI streaming via Letta provider
-│       │   ├── db.ts          # D1 query functions (conversations, messages)
+│       │   ├── crypto.ts      # AES-GCM encryption for BYOK API keys
+│       │   ├── db.ts          # D1 query functions (conversations, messages, keys)
 │       │   ├── exa.ts         # Exa AI web search
 │       │   ├── firecrawl.ts   # Firecrawl URL extraction
+│       │   ├── keys.ts        # BYOK key resolution (decrypt + lookup)
 │       │   ├── middleware.ts   # Session + auth middleware
 │       │   ├── sanitize.ts    # Error/secret sanitization
 │       │   ├── schema.ts      # Drizzle ORM schema
@@ -113,6 +128,9 @@ The Worker handles all data operations and AI streaming. Authenticated via Bette
 |---|---|---|
 | GET | `/health` | Health check |
 | * | `/api/auth/*` | Better Auth (login, signup, session) |
+| PUT | `/api/keys/:provider` | Store encrypted BYOK API key |
+| GET | `/api/keys` | List configured providers |
+| DELETE | `/api/keys/:provider` | Remove API key |
 | POST | `/api/search` | Exa AI web search |
 | POST | `/api/extract` | Firecrawl URL content extraction |
 | POST | `/api/conversations` | Create conversation |
@@ -135,6 +153,19 @@ Svelte UI is planned. Current modules:
 - `mcp-oauth.ts` — OAuth PKCE flow for authenticating with MCP servers
 
 **Dev server**: `localhost:1420`, HMR enabled. **Build target**: ES2021.
+
+## Web App (Next.js / React)
+
+Browser-based client at `apps/web/`. Next.js 16 with React 19, authenticates via Better Auth (GitHub OAuth) against the Worker API.
+
+- `auth-client.ts` — Better Auth React client with cookie credentials
+- `auth-guard.tsx` — Session-gated wrapper; redirects unauthenticated users to `/sign-in`
+- `sign-in/page.tsx` — GitHub OAuth sign-in page
+- `onboarding/page.tsx` — BYOK key entry for Letta, Exa, Firecrawl
+- `(chat)/` — Authenticated chat layout (sidebar + conversation pages)
+- `code/` — Code mode layout
+
+**Dev server**: `localhost:3000` (Next.js default). CORS is configured on the Worker to allow this origin in development.
 
 ## Build & Run
 

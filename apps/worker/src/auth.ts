@@ -42,7 +42,7 @@ export function createAuth(env: Bindings) {
     }),
     trustedOrigins: isProduction
       ? ["tauri://localhost"]
-      : ["tauri://localhost", "http://localhost:1420"],
+      : ["tauri://localhost", "http://localhost:1420", "http://localhost:3000"],
     advanced: {
       useSecureCookies: isProduction,
     },

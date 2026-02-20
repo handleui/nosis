@@ -270,18 +270,25 @@ export async function saveMessage(
   tokensIn: number,
   tokensOut: number
 ): Promise<Message> {
-  // Verify ownership, touch updated_at, and insert — all in one batch.
-  // Avoids an extra getConversation round-trip (D1 FK errors surface as 500, not 404).
-  const [convCheck, , inserted] = await db.batch([
-    db
-      .select({ id: conversations.id })
-      .from(conversations)
-      .where(
-        and(
-          eq(conversations.id, conversationId),
-          eq(conversations.user_id, userId)
-        )
-      ),
+  // Verify ownership BEFORE inserting. D1 batch executes all statements
+  // regardless of earlier results, so a single batch would insert the message
+  // even when the ownership check fails (TOCTOU authorization bypass).
+  const convCheck = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.user_id, userId)
+      )
+    );
+
+  if (convCheck.length === 0) {
+    notFound("Conversation");
+  }
+
+  // Ownership confirmed — touch updated_at and insert in one batch.
+  const [, inserted] = await db.batch([
     db
       .update(conversations)
       .set({ updated_at: sql`datetime('now')` })
@@ -299,10 +306,6 @@ export async function saveMessage(
       })
       .returning(),
   ]);
-
-  if (convCheck.length === 0) {
-    notFound("Conversation");
-  }
 
   const row = inserted[0];
   if (!row) {

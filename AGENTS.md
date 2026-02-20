@@ -1,6 +1,6 @@
 # Nosis
 
-Tauri 2 desktop AI chat client for macOS. Turborepo monorepo with Rust backend, Svelte frontend (planned).
+Tauri 2 desktop AI chat client for macOS. Turborepo monorepo with Rust backend, Svelte frontend (planned), and a Next.js web client.
 
 ## Build
 
@@ -46,12 +46,22 @@ Bypass portless with `PORTLESS=0 bun run dev`.
   - `apps/desktop/src-tauri/src/placement.rs` — Window placement modes
   - `apps/desktop/src-tauri/src/secrets.rs` — Encrypted secret store (iota_stronghold)
   - `apps/desktop/src-tauri/src/util.rs` — String utilities
+- `apps/web/` — Next.js web client (React 19)
+  - `apps/web/src/lib/auth-client.ts` — Better Auth React client
+  - `apps/web/src/components/auth-guard.tsx` — Session guard, redirects to /sign-in
+  - `apps/web/src/app/sign-in/page.tsx` — GitHub OAuth sign-in
+  - `apps/web/src/app/onboarding/page.tsx` — BYOK API key setup
+  - `apps/web/src/app/(chat)/` — Authenticated chat layout + pages
+  - `apps/web/src/app/code/` — Code mode layout + pages
 - `apps/worker/` — Cloudflare Workers API (Hono)
   - `apps/worker/src/index.ts` — Hono app with auth, CORS, all API routes
+  - `apps/worker/src/auth.ts` — Better Auth setup
   - `apps/worker/src/chat.ts` — AI streaming via Letta provider
-  - `apps/worker/src/db.ts` — D1 query functions (conversations, messages)
+  - `apps/worker/src/crypto.ts` — AES-GCM encryption for BYOK API keys
+  - `apps/worker/src/db.ts` — D1 query functions (conversations, messages, keys)
   - `apps/worker/src/exa.ts` — Exa AI web search
   - `apps/worker/src/firecrawl.ts` — Firecrawl URL extraction
+  - `apps/worker/src/keys.ts` — BYOK key resolution (decrypt + lookup)
   - `apps/worker/wrangler.jsonc` — Wrangler config
 - `packages/provider/` — `@nosis/provider` — Letta AI SDK wrapper
 

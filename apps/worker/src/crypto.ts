@@ -45,15 +45,19 @@ export async function encryptApiKey(
     encoded
   );
   const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv, 0);
+  combined.set(iv);
   combined.set(new Uint8Array(ciphertext), iv.length);
 
-  // Build binary string without spread to avoid call-stack limits on large buffers
-  let binary = "";
-  for (const byte of combined) {
-    binary += String.fromCharCode(byte);
+  // Build binary string in chunks to avoid call-stack limits (spread) and
+  // O(n^2) string concatenation (single-char loop). 8 KiB chunks keep each
+  // String.fromCharCode call well within safe argument-count limits while
+  // producing far fewer intermediate strings than the byte-at-a-time approach.
+  const CHUNK = 8192;
+  const parts: string[] = [];
+  for (let i = 0; i < combined.length; i += CHUNK) {
+    parts.push(String.fromCharCode(...combined.subarray(i, i + CHUNK)));
   }
-  return btoa(binary);
+  return btoa(parts.join(""));
 }
 
 export async function decryptApiKey(
