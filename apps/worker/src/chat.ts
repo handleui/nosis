@@ -16,7 +16,7 @@ import {
   trySetConversationAgentId,
 } from "./db";
 import { getActiveTools } from "./mcp";
-import { sanitizeError } from "./sanitize";
+import { sanitizeError, sanitizeRole } from "./sanitize";
 import type { Bindings } from "./types";
 
 /** Resolve or create the Letta agent for a conversation (race-safe). */
@@ -69,21 +69,6 @@ async function resolveAgentId(
 
 /** Max research tool calls per request — prevents unbounded Letta sub-calls. */
 const MAX_RESEARCH_CALLS_PER_REQUEST = 5;
-
-/**
- * Strip a role string to safe alphanumeric/underscore/hyphen characters.
- * Throws 500 (internal) if empty after stripping — callers pass known literals.
- */
-function sanitizeRole(role: string): string {
-  const safe = role
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "")
-    .slice(0, 64);
-  if (!safe) {
-    throw new HTTPException(500, { message: "Invalid specialist role" });
-  }
-  return safe;
-}
 
 /**
  * Resolve or create a specialist Letta agent for a given role (race-safe).

@@ -37,6 +37,21 @@ function errorMessage(err: unknown): string {
   return "Unknown error";
 }
 
+/**
+ * Strip a role string to safe alphanumeric/underscore/hyphen characters.
+ * Throws 500 (internal) if empty after stripping — callers pass known literals.
+ */
+export function sanitizeRole(role: string): string {
+  const safe = role
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 64);
+  if (!safe) {
+    throw new Error("Invalid specialist role");
+  }
+  return safe;
+}
+
 /** Produce a safe, truncated string from an unknown error value for logging. */
 export function sanitizeError(
   err: unknown,
