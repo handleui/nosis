@@ -36,6 +36,9 @@ function OnboardingForm() {
           credentials: "include",
           signal: controller.signal,
         });
+        if (!res.ok) {
+          return;
+        }
         const rows: { provider: string }[] = await res.json();
         setConfigured(new Set(rows.map((r) => r.provider)));
       } catch {
