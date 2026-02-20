@@ -242,19 +242,19 @@ export async function streamChat(
           return "Research tool call limit reached for this request.";
         }
 
-        if (!cachedSpecialistId) {
-          cachedSpecialistId = await resolveSpecialistAgentId(
-            provider,
-            db,
-            conversationId,
-            userId,
-            "research",
-            ctx,
-            lettaApiKey
-          );
-        }
-
         try {
+          if (!cachedSpecialistId) {
+            cachedSpecialistId = await resolveSpecialistAgentId(
+              provider,
+              db,
+              conversationId,
+              userId,
+              "research",
+              ctx,
+              lettaApiKey
+            );
+          }
+
           const result = await generateText({
             model: provider(),
             providerOptions: {
