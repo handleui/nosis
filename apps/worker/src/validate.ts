@@ -226,6 +226,31 @@ function isPrivateMcpIPv4(hostname: string): boolean {
   return false;
 }
 
+/**
+ * Handle both dotted-decimal (127.0.0.1) and URL-parser-normalized hex-colon
+ * (7f00:1) forms of IPv4-mapped IPv6 suffixes.
+ */
+function isPrivateMappedIPv4(suffix: string): boolean {
+  if (suffix.includes(".")) {
+    return isPrivateMcpIPv4(suffix);
+  }
+  // Hex-colon form: two 16-bit groups e.g. "7f00:1" for 127.0.0.1
+  const groups = suffix.split(":");
+  if (groups.length !== 2) {
+    return false;
+  }
+  const hi = Number.parseInt(groups[0], 16);
+  const lo = Number.parseInt(groups[1], 16);
+  if (Number.isNaN(hi) || Number.isNaN(lo) || hi > 0xff_ff || lo > 0xff_ff) {
+    return false;
+  }
+  const a = Math.floor(hi / 256);
+  const b = hi % 256;
+  const c = Math.floor(lo / 256);
+  const d = lo % 256;
+  return isPrivateMcpIPv4(`${a}.${b}.${c}.${d}`);
+}
+
 function isPrivateMcpIPv6(hostname: string): boolean {
   const raw =
     hostname.startsWith("[") && hostname.endsWith("]")
@@ -239,7 +264,7 @@ function isPrivateMcpIPv6(hostname: string): boolean {
   if (lower.startsWith("fe80:") || lower.startsWith("fe80%")) {
     return true; // link-local
   }
-  if (lower.startsWith("::ffff:") && isPrivateMcpIPv4(lower.slice(7))) {
+  if (lower.startsWith("::ffff:") && isPrivateMappedIPv4(lower.slice(7))) {
     return true; // mapped IPv4
   }
   if (lower === "::" || lower === "0:0:0:0:0:0:0:0") {
