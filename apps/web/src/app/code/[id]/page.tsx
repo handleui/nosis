@@ -10,9 +10,9 @@ export default function CodeSessionPage() {
   const { messages, sendMessage, status, error } = useNosisChat(id);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       {/* Chat area */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-end gap-8 overflow-y-auto p-4">
+      <div className="scrollbar-hidden flex min-h-0 min-w-0 flex-1 flex-col items-center justify-end gap-8 overflow-y-auto overscroll-none p-4">
         <ChatMessages error={error} messages={messages} status={status} />
       </div>
 

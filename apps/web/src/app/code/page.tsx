@@ -1,10 +1,3 @@
-// Figma asset URLs
-const imgFrame5 =
-  "https://www.figma.com/api/mcp/asset/527b4b1c-1b31-4962-affc-2c501def8d30";
-const imgFrame6 =
-  "https://www.figma.com/api/mcp/asset/4b520583-c7ba-4636-b384-1401e793e629";
-const imgFrame7 =
-  "https://www.figma.com/api/mcp/asset/56549334-809d-4482-8da6-fe0b71410e0e";
 const imgEllipse3 =
   "https://www.figma.com/api/mcp/asset/164cc6b5-7758-42ab-bb5f-b2f162eafb73";
 const imgGemini1 =
@@ -16,39 +9,8 @@ const imgFrame9 =
 
 export default function CodeHome() {
   return (
-    <div className="flex h-full flex-col">
-      {/* Top bar */}
-      <div className="flex h-10 w-full shrink-0 items-center gap-3 border-[#f1f1f2] border-b px-4">
-        <div className="flex min-h-0 min-w-0 flex-1 items-center gap-3">
-          <p className="shrink-0 font-sans text-black text-sm leading-normal">
-            Harden the SDK error payload
-          </p>
-          <div className="flex shrink-0 items-center justify-center gap-2">
-            <img alt="" className="size-3 shrink-0" src={imgFrame5} />
-            <p className="shrink-0 font-sans text-[#808080] text-sm leading-[1.2]">
-              feat/sdk-mcp
-            </p>
-          </div>
-        </div>
-
-        {/* PR badge */}
-        <div className="flex shrink-0 items-center justify-center gap-1.5 rounded-[6px] bg-[#dfffdf] px-1 py-[3px]">
-          <img alt="" className="size-3 shrink-0" src={imgFrame6} />
-          <p className="shrink-0 font-sans text-[#54c723] text-xs leading-[1.2]">
-            #159
-          </p>
-        </div>
-
-        {/* Collapse icon */}
-        <div className="flex shrink-0 items-center justify-center">
-          <div className="flex-none rotate-180">
-            <img alt="" className="size-3 shrink-0" src={imgFrame7} />
-          </div>
-        </div>
-      </div>
-
-      {/* Chat area */}
-      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col items-center justify-end gap-8 p-4">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+      <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col items-center justify-end gap-8 overflow-y-auto overscroll-none p-4">
         <div className="flex w-full max-w-[750px] flex-col justify-end gap-8">
           {/* User message bubble */}
           <div className="flex w-full shrink-0 items-start overflow-hidden rounded-[16px] bg-[#f6fbff] p-4">
