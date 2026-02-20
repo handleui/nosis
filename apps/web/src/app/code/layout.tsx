@@ -27,7 +27,7 @@ const imgFrameArrow =
 
 function DiffBadge() {
   return (
-    <div className="flex shrink-0 items-center gap-2 text-sm leading-[1.2]">
+    <div className="flex shrink-0 items-center gap-2 text-xs leading-[1.2]">
       <p className="shrink-0 text-[#00ec7e]">+440</p>
       <p className="shrink-0 text-[#f53b3a]">-1130</p>
     </div>

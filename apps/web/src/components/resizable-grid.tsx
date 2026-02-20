@@ -25,6 +25,7 @@ interface ResizableGridProps {
   initialLeft?: number;
   initialRight?: number;
   onLeftCollapsedChange?: (collapsed: boolean) => void;
+  allowUserResize?: boolean;
 }
 
 const clamp = (min: number, value: number, max: number) =>
@@ -112,7 +113,7 @@ const SidebarPanel = ({ side, width, children }: SidebarPanelProps) => {
   return (
     <aside className="relative overflow-hidden" style={{ minWidth: 0 }}>
       <div
-        className={`scrollbar-hidden absolute top-0 ${isLeft ? "left-0" : "right-0 flex flex-col"} h-full overflow-y-auto`}
+        className={`scrollbar-hidden absolute top-0 ${isLeft ? "left-0" : "right-0 flex flex-col"} h-full overflow-y-auto overscroll-none`}
         data-sidebar-inner={side}
         style={{
           width: "100%",
@@ -341,6 +342,7 @@ const ResizableGrid = ({
   initialLeft,
   initialRight,
   onLeftCollapsedChange,
+  allowUserResize = true,
   ref,
 }: ResizableGridProps & { ref?: Ref<ResizableGridHandle> }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -372,9 +374,13 @@ const ResizableGrid = ({
   return (
     <div
       className="resizable-grid relative grid flex-1 overflow-hidden"
-      data-active-handle={activeHandle ?? undefined}
+      data-active-handle={
+        allowUserResize ? (activeHandle ?? undefined) : undefined
+      }
       data-hovered-handle={
-        activeHandle ? undefined : (hoveredHandle ?? undefined)
+        allowUserResize && !activeHandle
+          ? (hoveredHandle ?? undefined)
+          : undefined
       }
       data-left-open={widthRef.current.left > 0 ? "" : undefined}
       data-right-open={widthRef.current.right > 0 ? "" : undefined}
@@ -390,7 +396,7 @@ const ResizableGrid = ({
             widthRef.current.right,
             CONSTRAINTS.right.initial
           ),
-          cursor: activeHandle ? "grabbing" : undefined,
+          cursor: allowUserResize && activeHandle ? "grabbing" : undefined,
         } as CSSProperties
       }
     >
@@ -398,39 +404,43 @@ const ResizableGrid = ({
         {left}
       </SidebarPanel>
 
-      <main className="scrollbar-hidden overflow-y-auto">{center}</main>
+      <main className="min-h-0 min-w-0 overflow-hidden">{center}</main>
 
       <SidebarPanel side="right" width={widthRef.current.right}>
         {right}
       </SidebarPanel>
 
-      <DragHandle
-        isActive={activeHandle === "left"}
-        onPointerDown={(e) => startDrag("left", e)}
-        onPointerEnter={() => !activeHandle && setHoveredHandle("left")}
-        onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
-        position={widthRef.current.left}
-        side="left"
-      />
-      <DragHandle
-        isActive={activeHandle === "right"}
-        onPointerDown={(e) => startDrag("right", e)}
-        onPointerEnter={() => !activeHandle && setHoveredHandle("right")}
-        onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
-        position={widthRef.current.right}
-        side="right"
-      />
+      {allowUserResize ? (
+        <>
+          <DragHandle
+            isActive={activeHandle === "left"}
+            onPointerDown={(e) => startDrag("left", e)}
+            onPointerEnter={() => !activeHandle && setHoveredHandle("left")}
+            onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
+            position={widthRef.current.left}
+            side="left"
+          />
+          <DragHandle
+            isActive={activeHandle === "right"}
+            onPointerDown={(e) => startDrag("right", e)}
+            onPointerEnter={() => !activeHandle && setHoveredHandle("right")}
+            onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
+            position={widthRef.current.right}
+            side="right"
+          />
 
-      <EdgeHitbox
-        isActive={hitboxActive.left}
-        onPointerDown={(e) => startDrag("left", e)}
-        side="left"
-      />
-      <EdgeHitbox
-        isActive={hitboxActive.right}
-        onPointerDown={(e) => startDrag("right", e)}
-        side="right"
-      />
+          <EdgeHitbox
+            isActive={hitboxActive.left}
+            onPointerDown={(e) => startDrag("left", e)}
+            side="left"
+          />
+          <EdgeHitbox
+            isActive={hitboxActive.right}
+            onPointerDown={(e) => startDrag("right", e)}
+            side="right"
+          />
+        </>
+      ) : null}
     </div>
   );
 };
