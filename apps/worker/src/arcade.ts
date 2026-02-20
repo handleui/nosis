@@ -157,7 +157,7 @@ export async function checkAuthStatus(
   }
 
   const params = new URLSearchParams();
-  params.set("authorization_id", authorizationId);
+  params.set("id", authorizationId);
   const clampedWait =
     wait !== undefined
       ? Math.min(Math.max(0, wait), MAX_WAIT_SECONDS)

@@ -242,6 +242,15 @@ function isPrivateMcpIPv6(hostname: string): boolean {
   if (lower.startsWith("::ffff:") && isPrivateMcpIPv4(lower.slice(7))) {
     return true; // mapped IPv4
   }
+  if (lower === "::" || lower === "0:0:0:0:0:0:0:0") {
+    return true; // unspecified
+  }
+  if (lower.startsWith("fc") || lower.startsWith("fd")) {
+    return true; // unique local address (ULA)
+  }
+  if (lower.startsWith("ff")) {
+    return true; // multicast
+  }
 
   return false;
 }

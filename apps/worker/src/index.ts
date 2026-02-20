@@ -291,6 +291,9 @@ app.get("/api/arcade/tools", async (c) => {
   const toolkit = c.req.query("toolkit");
   const limitStr = c.req.query("limit");
   const limit = limitStr ? Number(limitStr) : undefined;
+  if (limit !== undefined && Number.isNaN(limit)) {
+    throw new HTTPException(400, { message: "Invalid limit" });
+  }
 
   const result = await listTools(arcadeKey, userId, toolkit, limit);
   return c.json(result);
@@ -321,6 +324,9 @@ app.get("/api/arcade/auth/:id/status", async (c) => {
   const authorizationId = c.req.param("id");
   const waitStr = c.req.query("wait");
   const wait = waitStr ? Number(waitStr) : undefined;
+  if (wait !== undefined && Number.isNaN(wait)) {
+    throw new HTTPException(400, { message: "Invalid wait" });
+  }
 
   const result = await checkAuthStatus(arcadeKey, authorizationId, wait);
   return c.json(result);
