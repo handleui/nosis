@@ -7,7 +7,9 @@ import {
   saveMessageBatch,
   trySetConversationAgentId,
 } from "./db";
+import { getActiveTools } from "./mcp";
 import { sanitizeError } from "./sanitize";
+import type { Bindings } from "./types";
 
 /** Resolve or create the Letta agent for a conversation (race-safe). */
 async function resolveAgentId(
@@ -63,7 +65,8 @@ export async function streamChat(
   conversationId: string,
   userId: string,
   content: string,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  env: Bindings
 ): Promise<Response> {
   // Lightweight lookup — only fetches letta_agent_id, not the full conversation row
   const existingAgentId = await getConversationAgentId(
@@ -82,16 +85,21 @@ export async function streamChat(
     lettaApiKey
   );
 
-  await saveMessageBatch(
-    db,
-    crypto.randomUUID(),
-    conversationId,
-    "user",
-    content,
-    null,
-    0,
-    0
-  );
+  // Save user message and load MCP tools in parallel (independent operations)
+  const [, { tools, cleanup }] = await Promise.all([
+    saveMessageBatch(
+      db,
+      crypto.randomUUID(),
+      conversationId,
+      "user",
+      content,
+      null,
+      0,
+      0
+    ),
+    getActiveTools(db, env, userId),
+  ]);
+  const hasTools = Object.keys(tools).length > 0;
 
   const result = streamText({
     model: provider(),
@@ -102,36 +110,38 @@ export async function streamChat(
       },
     },
     prompt: content,
+    ...(hasTools && { tools }),
     onError({ error }) {
       console.error("streamText error:", sanitizeError(error, [lettaApiKey]));
     },
   });
 
-  // Persist assistant reply after stream completes.
-  // Runs to completion even if the client disconnects mid-stream —
-  // intentional so we always cache the full response in D1.
+  // Persist assistant reply and clean up MCP clients after stream completes.
+  // Both must wait for the stream to finish: the save needs the full text,
+  // and MCP clients must stay open for tool calls during streaming.
   ctx.waitUntil(
     (async () => {
       try {
         const text = await result.text;
-        if (text.trim().length === 0) {
-          return;
+        if (text.trim().length > 0) {
+          await saveMessageBatch(
+            db,
+            crypto.randomUUID(),
+            conversationId,
+            "assistant",
+            text,
+            null,
+            0,
+            0
+          );
         }
-        await saveMessageBatch(
-          db,
-          crypto.randomUUID(),
-          conversationId,
-          "assistant",
-          text,
-          null,
-          0,
-          0
-        );
       } catch (err: unknown) {
         console.error(
           `Failed to save assistant message [conversation=${conversationId}]:`,
           sanitizeError(err, [lettaApiKey])
         );
+      } finally {
+        await cleanup().catch(() => undefined);
       }
     })()
   );

@@ -54,6 +54,7 @@
       "name": "nosis-worker",
       "version": "0.1.0",
       "dependencies": {
+        "@ai-sdk/mcp": "^1.0.21",
         "@nosis/provider": "workspace:*",
         "ai": "^6.0.87",
         "better-auth": "^1.4.18",

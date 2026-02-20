@@ -104,6 +104,22 @@ export const userApiKeys = sqliteTable(
   (table) => [primaryKey({ columns: [table.user_id, table.provider] })]
 );
 
+export const mcpServers = sqliteTable(
+  "mcp_servers",
+  {
+    id: text("id").primaryKey().notNull(),
+    user_id: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    auth_type: text("auth_type").notNull().default("none"),
+    created_at: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updated_at: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => [index("idx_mcp_servers_user").on(table.user_id)]
+);
+
 export const messages = sqliteTable(
   "messages",
   {

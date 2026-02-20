@@ -5,17 +5,21 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
+import { authorizeTool, checkAuthStatus, listTools } from "./arcade";
 import { createAuth } from "./auth";
 import { streamChat } from "./chat";
 import { encryptApiKey } from "./crypto";
 import {
   type AppDatabase,
+  addMcpServer,
   createConversation,
   deleteConversation,
+  deleteMcpServer,
   deleteUserApiKey,
   getConversation,
   getMessages,
   listConversations,
+  listMcpServers,
   listUserApiKeys,
   saveMessage,
   setConversationAgentId,
@@ -40,6 +44,9 @@ import {
   validateAgentId,
   validateApiKeyInput,
   validateContent,
+  validateMcpAuthType,
+  validateMcpName,
+  validateMcpUrl,
   validateModel,
   validatePagination,
   validateProvider,
@@ -212,6 +219,119 @@ app.post(
   }
 );
 
+// ── MCP Servers ──
+
+app.post(
+  "/api/mcp/servers",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const body = await parseJsonBody(c);
+    const name = validateMcpName(body.name);
+    const url = validateMcpUrl(body.url);
+    const authType = validateMcpAuthType(body.auth_type ?? "none");
+
+    const id = crypto.randomUUID();
+
+    // If api_key auth, encrypt and store the key
+    if (authType === "api_key") {
+      const apiKey = validateApiKeyInput(body.api_key);
+      const encrypted = await encryptApiKey(
+        c.env.BETTER_AUTH_SECRET,
+        userId,
+        apiKey
+      );
+      await upsertUserApiKey(db(c.env), userId, `mcp:${id}`, encrypted);
+    }
+
+    const server = await addMcpServer(
+      db(c.env),
+      id,
+      userId,
+      name,
+      url,
+      authType
+    );
+    return c.json(server, 201);
+  }
+);
+
+app.get("/api/mcp/servers", async (c) => {
+  const userId = getUserId(c);
+  const servers = await listMcpServers(db(c.env), userId);
+  return c.json(servers);
+});
+
+app.delete("/api/mcp/servers/:id", async (c) => {
+  const userId = getUserId(c);
+  const id = validateUuid(c.req.param("id"));
+  const deleted = await deleteMcpServer(db(c.env), id, userId);
+
+  if (!deleted) {
+    throw new HTTPException(404, { message: "MCP server not found" });
+  }
+
+  // Fire-and-forget cleanup of associated encrypted key (don't block response)
+  c.executionCtx.waitUntil(
+    deleteUserApiKey(db(c.env), userId, `mcp:${id}`).catch(() => undefined)
+  );
+
+  return c.json({ ok: true });
+});
+
+// ── Arcade Management ──
+
+app.get("/api/arcade/tools", async (c) => {
+  const userId = getUserId(c);
+  const arcadeKey = c.env.ARCADE_API_KEY;
+  if (!arcadeKey) {
+    throw new HTTPException(404, { message: "Arcade not configured" });
+  }
+
+  const toolkit = c.req.query("toolkit");
+  const limitStr = c.req.query("limit");
+  const limit = limitStr ? Number(limitStr) : undefined;
+  if (limit !== undefined && Number.isNaN(limit)) {
+    throw new HTTPException(400, { message: "Invalid limit" });
+  }
+
+  const result = await listTools(arcadeKey, userId, toolkit, limit);
+  return c.json(result);
+});
+
+app.post(
+  "/api/arcade/tools/:name/authorize",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const arcadeKey = c.env.ARCADE_API_KEY;
+    if (!arcadeKey) {
+      throw new HTTPException(404, { message: "Arcade not configured" });
+    }
+
+    const toolName = c.req.param("name");
+    const result = await authorizeTool(arcadeKey, userId, toolName);
+    return c.json(result);
+  }
+);
+
+app.get("/api/arcade/auth/:id/status", async (c) => {
+  const arcadeKey = c.env.ARCADE_API_KEY;
+  if (!arcadeKey) {
+    throw new HTTPException(404, { message: "Arcade not configured" });
+  }
+
+  const authorizationId = c.req.param("id");
+  const waitStr = c.req.query("wait");
+  const wait = waitStr ? Number(waitStr) : undefined;
+  if (wait !== undefined && Number.isNaN(wait)) {
+    throw new HTTPException(400, { message: "Invalid wait" });
+  }
+
+  const result = await checkAuthStatus(arcadeKey, authorizationId, wait);
+  return c.json(result);
+});
+
 // ── Conversations ──
 
 app.post(
@@ -353,7 +473,8 @@ app.post(
       conversationId,
       userId,
       content,
-      c.executionCtx
+      c.executionCtx,
+      c.env
     );
   }
 );
@@ -367,6 +488,7 @@ app.onError((err, c) => {
     c.env.LETTA_API_KEY,
     c.env.EXA_API_KEY,
     c.env.FIRECRAWL_API_KEY,
+    c.env.ARCADE_API_KEY,
     c.env.BETTER_AUTH_SECRET,
     c.env.GITHUB_CLIENT_ID,
     c.env.GITHUB_CLIENT_SECRET,

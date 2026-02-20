@@ -1,9 +1,9 @@
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { HTTPException } from "hono/http-exception";
-import { conversations, messages, userApiKeys } from "./schema";
+import { conversations, mcpServers, messages, userApiKeys } from "./schema";
 import type * as schema from "./schema";
-import type { Conversation, Message } from "./types";
+import type { Conversation, McpServer, Message } from "./types";
 
 export type AppDatabase = DrizzleD1Database<typeof schema>;
 export type MessageRole = (typeof messages.$inferInsert)["role"];
@@ -42,11 +42,11 @@ export async function upsertUserApiKey(
     });
 }
 
-export function listUserApiKeys(
+export async function listUserApiKeys(
   db: AppDatabase,
   userId: string
 ): Promise<UserApiKeyMeta[]> {
-  return db
+  return await db
     .select({
       provider: userApiKeys.provider,
       created_at: userApiKeys.created_at,
@@ -76,6 +76,52 @@ export async function deleteUserApiKey(
   }
 }
 
+// ── MCP Servers ──
+
+export async function addMcpServer(
+  db: AppDatabase,
+  id: string,
+  userId: string,
+  name: string,
+  url: string,
+  authType: string
+): Promise<McpServer> {
+  const row = await db
+    .insert(mcpServers)
+    .values({ id, user_id: userId, name, url, auth_type: authType })
+    .returning()
+    .get();
+
+  if (!row) {
+    throw new HTTPException(500, { message: "Failed to add MCP server" });
+  }
+  return row;
+}
+
+export async function listMcpServers(
+  db: AppDatabase,
+  userId: string
+): Promise<McpServer[]> {
+  return await db
+    .select()
+    .from(mcpServers)
+    .where(eq(mcpServers.user_id, userId))
+    .orderBy(asc(mcpServers.created_at));
+}
+
+export async function deleteMcpServer(
+  db: AppDatabase,
+  id: string,
+  userId: string
+): Promise<boolean> {
+  const result = await db
+    .delete(mcpServers)
+    .where(and(eq(mcpServers.id, id), eq(mcpServers.user_id, userId)))
+    .returning({ id: mcpServers.id });
+
+  return result.length > 0;
+}
+
 // ── Conversations ──
 
 export async function createConversation(
@@ -98,13 +144,13 @@ export async function createConversation(
   return row;
 }
 
-export function listConversations(
+export async function listConversations(
   db: AppDatabase,
   userId: string,
   limit: number,
   offset: number
 ): Promise<Conversation[]> {
-  return db
+  return await db
     .select()
     .from(conversations)
     .where(eq(conversations.user_id, userId))

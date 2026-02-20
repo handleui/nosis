@@ -1,4 +1,4 @@
-import type { conversations, messages } from "./schema";
+import type { conversations, mcpServers, messages } from "./schema";
 
 // ── Worker Bindings ──
 
@@ -7,6 +7,7 @@ export interface Bindings {
   EXA_API_KEY?: string;
   FIRECRAWL_API_KEY?: string;
   LETTA_API_KEY?: string;
+  ARCADE_API_KEY?: string;
   DB: D1Database;
   KV?: KVNamespace;
   BETTER_AUTH_SECRET: string;
@@ -77,3 +78,7 @@ export type Conversation = typeof conversations.$inferSelect;
 // ── Messages ──
 
 export type Message = typeof messages.$inferSelect;
+
+// ── MCP Servers ──
+
+export type McpServer = typeof mcpServers.$inferSelect;

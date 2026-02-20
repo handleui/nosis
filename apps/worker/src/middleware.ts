@@ -13,6 +13,21 @@ export interface AuthVariables {
   session: Record<string, unknown> | null;
 }
 
+// Defense-in-depth: reject user IDs with control characters (CRLF, null, etc.)
+// to prevent header injection when the ID flows into HTTP headers like
+// Arcade-User-ID. Only printable ASCII is allowed.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — detect injection via C0 controls / DEL
+const HEADER_UNSAFE_PATTERN = /[\u0000-\u001f\u007f]/;
+const MAX_USER_ID_LENGTH = 200;
+
+function isHeaderSafeUserId(id: string): boolean {
+  return (
+    id.length > 0 &&
+    id.length <= MAX_USER_ID_LENGTH &&
+    !HEADER_UNSAFE_PATTERN.test(id)
+  );
+}
+
 export const sessionMiddleware = createMiddleware<{
   Bindings: Bindings;
   Variables: AuthVariables;
@@ -26,7 +41,8 @@ export const sessionMiddleware = createMiddleware<{
   if (
     rawUser &&
     typeof rawUser === "object" &&
-    typeof rawUser.id === "string"
+    typeof rawUser.id === "string" &&
+    isHeaderSafeUserId(rawUser.id)
   ) {
     c.set("user", rawUser as AuthUser);
   } else {
