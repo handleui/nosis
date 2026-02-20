@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
 import { createAuth } from "./auth";
+import type { Auth } from "./auth";
 import type { Bindings } from "./types";
 
 export interface AuthUser {
@@ -11,6 +12,7 @@ export interface AuthUser {
 export interface AuthVariables {
   user: AuthUser | null;
   session: Record<string, unknown> | null;
+  auth: Auth;
 }
 
 // Defense-in-depth: reject user IDs with control characters (CRLF, null, etc.)
@@ -33,6 +35,7 @@ export const sessionMiddleware = createMiddleware<{
   Variables: AuthVariables;
 }>(async (c, next) => {
   const auth = createAuth(c.env);
+  c.set("auth", auth);
   const result = await auth.api.getSession({
     headers: c.req.raw.headers,
   });
@@ -69,4 +72,24 @@ export function getUserId(c: { get(key: "user"): AuthUser | null }): string {
     throw new HTTPException(401, { message: "Authentication required" });
   }
   return user.id;
+}
+
+/** Retrieve the user's GitHub OAuth access token from Better Auth.
+ *  Reuses the auth instance stored on context by sessionMiddleware to avoid
+ *  constructing a second betterAuth instance per request. */
+export async function getGithubToken(c: {
+  get(key: "auth"): Auth;
+  req: { raw: Request };
+}): Promise<string> {
+  const auth = c.get("auth");
+  const result = await auth.api.getAccessToken({
+    body: { providerId: "github" },
+    headers: c.req.raw.headers,
+  });
+  if (!result?.accessToken) {
+    throw new HTTPException(401, {
+      message: "GitHub account not connected",
+    });
+  }
+  return result.accessToken;
 }

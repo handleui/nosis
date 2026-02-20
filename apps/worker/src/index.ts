@@ -28,9 +28,17 @@ import {
 } from "./db";
 import { searchExa, validateSearchRequest } from "./exa";
 import { scrapeUrl, validateScrapeRequest } from "./firecrawl";
+import {
+  getCheckRuns,
+  getPullRequest,
+  listBranches,
+  listPullRequests,
+  listUserRepos,
+} from "./github";
 import { resolveUserApiKey } from "./keys";
 import {
   type AuthVariables,
+  getGithubToken,
   getUserId,
   requireAuth,
   sessionMiddleware,
@@ -48,8 +56,11 @@ import {
   validateMcpName,
   validateMcpUrl,
   validateModel,
+  validateOwner,
   validatePagination,
   validateProvider,
+  validatePullNumber,
+  validateRepoName,
   validateRole,
   validateTitle,
   validateTokenCount,
@@ -79,7 +90,8 @@ app.use(
       if (
         c.env.ENVIRONMENT === "development" &&
         (origin === "http://localhost:1420" ||
-          origin === "http://localhost:3000")
+          origin === "http://localhost:3000" ||
+          origin === "http://nosis-web.localhost:1355")
       ) {
         return origin;
       }
@@ -330,6 +342,97 @@ app.get("/api/arcade/auth/:id/status", async (c) => {
 
   const result = await checkAuthStatus(arcadeKey, authorizationId, wait);
   return c.json(result);
+});
+
+// ── GitHub ──
+
+const VALID_AFFILIATIONS = new Set([
+  "owner",
+  "collaborator",
+  "organization_member",
+]);
+const DEFAULT_AFFILIATION = "owner,collaborator,organization_member";
+
+function validateAffiliation(value: string | undefined): string {
+  if (value === undefined || value === "") {
+    return DEFAULT_AFFILIATION;
+  }
+  const parts = value.split(",");
+  for (const part of parts) {
+    if (!VALID_AFFILIATIONS.has(part.trim())) {
+      throw new HTTPException(400, {
+        message:
+          "affiliation must be a comma-separated list of: owner, collaborator, organization_member",
+      });
+    }
+  }
+  return value;
+}
+
+app.get("/api/github/repos", async (c) => {
+  const token = await getGithubToken(c);
+  const { limit, offset } = validatePagination(
+    c.req.query("limit"),
+    c.req.query("offset")
+  );
+  const affiliation = validateAffiliation(c.req.query("affiliation"));
+  const repos = await listUserRepos(token, {
+    perPage: limit,
+    page: Math.floor(offset / limit) + 1,
+    affiliation,
+  });
+  return c.json(repos);
+});
+
+app.get("/api/github/repos/:owner/:repo/branches", async (c) => {
+  const token = await getGithubToken(c);
+  const owner = validateOwner(c.req.param("owner"));
+  const repo = validateRepoName(c.req.param("repo"));
+  const { limit, offset } = validatePagination(
+    c.req.query("limit"),
+    c.req.query("offset")
+  );
+  const branches = await listBranches(token, owner, repo, {
+    perPage: limit,
+    page: Math.floor(offset / limit) + 1,
+  });
+  return c.json(branches);
+});
+
+app.get("/api/github/repos/:owner/:repo/pulls", async (c) => {
+  const token = await getGithubToken(c);
+  const owner = validateOwner(c.req.param("owner"));
+  const repo = validateRepoName(c.req.param("repo"));
+  const { limit, offset } = validatePagination(
+    c.req.query("limit"),
+    c.req.query("offset")
+  );
+  const state = c.req.query("state") ?? "open";
+  if (state !== "open" && state !== "closed" && state !== "all") {
+    throw new HTTPException(400, {
+      message: "state must be 'open', 'closed', or 'all'",
+    });
+  }
+  const pulls = await listPullRequests(token, owner, repo, {
+    perPage: limit,
+    page: Math.floor(offset / limit) + 1,
+    state,
+  });
+  return c.json(pulls);
+});
+
+app.get("/api/github/repos/:owner/:repo/pulls/:pull_number", async (c) => {
+  const token = await getGithubToken(c);
+  const owner = validateOwner(c.req.param("owner"));
+  const repo = validateRepoName(c.req.param("repo"));
+  const pullNumber = validatePullNumber(c.req.param("pull_number"));
+
+  const [pr, checkRuns] = await Promise.all([
+    getPullRequest(token, owner, repo, pullNumber),
+    getCheckRuns(token, owner, repo, `refs/pull/${pullNumber}/head`),
+  ]);
+
+  return c.json({ pr, check_runs: checkRuns });
 });
 
 // ── Conversations ──

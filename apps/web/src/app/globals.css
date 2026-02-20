@@ -29,6 +29,7 @@
 
 body {
   overscroll-behavior: none;
+  letter-spacing: -0.03em;
 }
 
 /* ── Resizable grid (from Detent Navigator) ── */

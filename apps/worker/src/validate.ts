@@ -352,6 +352,57 @@ export function validateMcpAuthType(value: unknown): McpAuthType {
   return value as McpAuthType;
 }
 
+// ── GitHub Params ──
+
+const MAX_OWNER_LENGTH = 40;
+const MAX_REPO_NAME_LENGTH = 100;
+const OWNER_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/;
+const REPO_REGEX = /^[a-zA-Z0-9._-]+$/;
+
+export function validateOwner(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_OWNER_LENGTH
+  ) {
+    badRequest("owner must be a string of 1-40 characters");
+  }
+  if (!OWNER_REGEX.test(value)) {
+    badRequest("owner contains invalid characters");
+  }
+  return value;
+}
+
+export function validateRepoName(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_REPO_NAME_LENGTH
+  ) {
+    badRequest("repo must be a string of 1-100 characters");
+  }
+  if (!REPO_REGEX.test(value)) {
+    badRequest("repo contains invalid characters");
+  }
+  // Reject dot-only segments that would cause path traversal when interpolated
+  // into a URL (e.g. ".." → /repos/owner/../pulls resolves to /repos/pulls).
+  if (value === "." || value === "..") {
+    badRequest("repo contains invalid characters");
+  }
+  return value;
+}
+
+export function validatePullNumber(value: unknown): number {
+  if (typeof value !== "string" && typeof value !== "number") {
+    badRequest("pull_number must be a positive integer");
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 999_999_999) {
+    badRequest("pull_number must be a positive integer");
+  }
+  return n;
+}
+
 // ── API Key Validation ──
 
 export function validateApiKeyInput(value: unknown): string {

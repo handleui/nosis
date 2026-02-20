@@ -21,31 +21,70 @@ export function createAuth(env: Bindings) {
       github: {
         clientId: env.GITHUB_CLIENT_ID,
         clientSecret: env.GITHUB_CLIENT_SECRET,
+        scope: ["read:user", "user:email", "repo"],
       },
     },
     session: {
       expiresIn: 60 * 60 * 24 * 7, // 7 days
       updateAge: 60 * 60 * 24, // refresh session daily
     },
-    ...(kv && {
-      secondaryStorage: {
-        get: (key: string) => kv.get(key),
-        set: (key: string, value: string, ttl?: number) =>
-          kv.put(key, value, ttl ? { expirationTtl: ttl } : undefined),
-        delete: (key: string) => kv.delete(key),
-      },
-      rateLimit: {
-        enabled: true,
-        window: 60, // KV minimum TTL is 60s
-        max: 10,
-      },
-    }),
+    account: {
+      // Cross-origin dev setup (nosis-web.localhost → nosis-api.localhost) prevents
+      // the signed state cookie from being stored by the browser on the fetch() POST.
+      // The D1 verification table still validates state; this only skips the cookie
+      // CSRF double-check. In production, web + API share a parent domain so cookies work.
+      skipStateCookieCheck: !isProduction,
+    },
+    ...(kv &&
+      isProduction && {
+        secondaryStorage: {
+          get: (key: string) => kv.get(key),
+          set: (key: string, value: string, ttl?: number) =>
+            kv.put(
+              key,
+              value,
+              ttl ? { expirationTtl: Math.max(60, ttl) } : undefined
+            ),
+          delete: (key: string) => kv.delete(key),
+        },
+        rateLimit: {
+          enabled: true,
+          window: 60, // KV minimum TTL is 60s
+          max: 10,
+        },
+      }),
     trustedOrigins: isProduction
       ? ["tauri://localhost"]
-      : ["tauri://localhost", "http://localhost:1420", "http://localhost:3000"],
+      : [
+          "tauri://localhost",
+          "http://localhost:1420",
+          "http://localhost:3000",
+          "http://nosis-web.localhost:1355",
+        ],
     advanced: {
       useSecureCookies: isProduction,
+      // In dev, web (nosis-web.localhost) and API (nosis-api.localhost) are cross-site.
+      // SameSite=None + Secure enables cross-site cookie set/send on fetch requests.
+      // Chrome treats *.localhost as a secure context, so Secure cookies work over HTTP.
+      // NOTE: Do NOT use `partitioned: true` here — CHIPS partitions cookies by top-level
+      // site, so the session cookie set during the OAuth callback (top-level = nosis-api)
+      // becomes invisible to cross-origin fetches from the web app (top-level = nosis-web).
+      // In production, web + API share a parent domain → crossSubDomainCookies with
+      // SameSite=Lax is preferred.
+      ...(!isProduction && {
+        defaultCookieAttributes: {
+          sameSite: "none" as const,
+          secure: true,
+        },
+      }),
     },
+    ...(!isProduction && {
+      onAPIError: {
+        onError(error) {
+          console.error("[Better Auth] underlying error:", error);
+        },
+      },
+    }),
     plugins: [bearer()],
   });
 }

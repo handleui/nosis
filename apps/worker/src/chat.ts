@@ -147,7 +147,7 @@ export async function streamChat(
   );
 
   // Streaming bypasses Hono's secureHeaders() — reapply manually
-  return result.toTextStreamResponse({
+  return result.toUIMessageStreamResponse({
     headers: {
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "no-store",

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
+    "dev": "portless nosis-web sh -c 'next dev --port $PORT'",
     "build": "next build",
     "start": "next start",
     "check-types": "tsc --noEmit",
@@ -12,7 +12,10 @@
     "fix": "ultracite fix"
   },
   "dependencies": {
+    "@ai-sdk/react": "^3.0.97",
     "@nosis/ui": "workspace:*",
+    "@pierre/diffs": "^1.0.11",
+    "ai": "^6.0.95",
     "better-auth": "^1.4.18",
     "next": "16.1.6",
     "react": "19.2.3",

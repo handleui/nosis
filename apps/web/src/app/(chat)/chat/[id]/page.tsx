@@ -1,23 +1,24 @@
 "use client";
 
 import { useParams } from "next/navigation";
+import { useNosisChat } from "@nosis/hooks/use-nosis-chat";
+import ChatMessages from "@nosis/components/chat-messages";
+import ChatInput from "@nosis/components/chat-input";
 
 export default function ConversationPage() {
   const { id } = useParams<{ id: string }>();
+  const { messages, sendMessage, status, error } = useNosisChat(id);
 
   return (
     <div className="flex flex-1 flex-col">
-      <div className="scrollbar-hidden flex-1 overflow-y-auto p-6">
-        <div className="mx-auto max-w-2xl">
-          <p className="text-muted text-sm">Chat: {id}</p>
-        </div>
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-end overflow-y-auto p-6">
+        <ChatMessages error={error} messages={messages} status={status} />
       </div>
       <div className="border-subtle border-t p-4">
         <div className="mx-auto max-w-2xl">
-          <textarea
-            className="w-full resize-none rounded-lg border border-subtle bg-surface px-4 py-3 text-sm outline-none placeholder:text-muted focus:border-foreground"
-            placeholder="Message Nosis..."
-            rows={3}
+          <ChatInput
+            disabled={status !== "ready"}
+            onSend={(text) => sendMessage({ text })}
           />
         </div>
       </div>
