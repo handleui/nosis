@@ -254,7 +254,13 @@ export async function streamChat(
               lettaApiKey
             );
           }
+        } catch (err: unknown) {
+          const sanitized = sanitizeError(err, [lettaApiKey]);
+          console.error("Research specialist resolution error:", sanitized);
+          return `Failed to initialize research specialist: ${sanitized}`;
+        }
 
+        try {
           const result = await generateText({
             model: provider(),
             providerOptions: {
