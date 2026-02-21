@@ -6,6 +6,7 @@ import { userApiKeys } from "./schema";
 import type { ApiProvider } from "./validate";
 
 const PROVIDER_LABELS: Record<ApiProvider, string> = {
+  daytona: "Daytona",
   exa: "Exa",
   firecrawl: "Firecrawl",
   letta: "Letta",

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.21",
+    "@daytonaio/sdk": "^0.144.0",
     "@nosis/provider": "workspace:*",
     "ai": "^6.0.87",
     "better-auth": "^1.4.18",
