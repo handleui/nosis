@@ -2,7 +2,7 @@ import {
   LEGACY_DEFAULT_EXECUTION_TARGET,
   SANDBOX_EXECUTION_TARGET,
   type CloudExecutionTarget,
-} from "@nosis/agent-runtime";
+} from "@nosis/agent-runtime/execution";
 import { HTTPException } from "hono/http-exception";
 
 const MAX_API_KEY_LENGTH = 500;

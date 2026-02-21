@@ -185,24 +185,39 @@ Current guardrails:
 - Worker chat validation remains sandbox-only.
 - Web conversation hooks default to sandbox filtering.
 - Local desktop execution remains out-of-scope for this PR.
+- Web and validation layers consume taxonomy from `@nosis/agent-runtime/execution`
+  (no provider/runtime coupling).
 
 ### Responsibility Split (Worker vs Web vs Shared)
 
-Target weighting for chat/runtime ownership:
+Actionable ownership boundaries:
 
-- Worker (`~80% runtime authority`)
-  - execution-target validation and canonicalization on write/read
-  - agent lifecycle (resolve/create/claim) and streaming orchestration
-  - office ownership enforcement and persistence guarantees
-  - tool loading policy and secrets/key resolution
-- Web (`~20% client authority`)
-  - route/view semantics (`chat` vs `code` thread UX)
-  - request shaping and optimistic state updates
-  - default filtering to sandbox-only conversation scope
-- Shared package (`@nosis/agent-runtime`)
-  - cross-surface execution taxonomy/types/constants
-  - reusable runtime primitives that are environment-agnostic
-  - no direct ownership of storage/auth/tool secrets
+- Worker owns:
+  - authoritative execution-target validation/canonicalization
+  - agent lifecycle and stream orchestration
+  - tool loading policy + key/secret resolution
+  - office ownership/persistence integrity guarantees
+  - code locations: `apps/worker/src/validate.ts`, `apps/worker/src/chat.ts`, `apps/worker/src/mcp.ts`, `apps/worker/src/db.ts`
+- Web owns:
+  - route/view semantics (`chat` vs `code`)
+  - request shaping and optimistic state
+  - default sandbox filtering for conversations
+  - code locations: `apps/web/src/app/(app)/layout.tsx`, `apps/web/src/components/app-sidebar.tsx`, `apps/web/src/features/chat/hooks/use-conversations.ts`
+- Desktop owns (planned runtime):
+  - local execution environment + filesystem bridge
+  - desktop-only capability adapters
+  - code location target: `apps/desktop/**`
+- Shared package owns:
+  - execution taxonomy (`@nosis/agent-runtime/execution`)
+  - runtime adapter contracts (`@nosis/agent-runtime/contracts`)
+  - shared agent primitives that are environment-agnostic
+  - code locations: `packages/agent-runtime/src/execution.ts`, `packages/agent-runtime/src/contracts.ts`, `packages/agent-runtime/src/index.ts`
+
+Cross-boundary rules:
+
+- Worker must not depend on UI route semantics.
+- Web must not own execution authority or key/secret resolution.
+- Shared package must not perform direct DB/network side effects tied to a specific app surface.
 
 ## Data Model (D1 + Drizzle)
 

@@ -5,14 +5,41 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: "@nosis/agent-runtime/execution",
+        replacement: fileURLToPath(
+          new URL(
+            "../../packages/agent-runtime/src/execution.ts",
+            import.meta.url
+          )
+        ),
+      },
+      {
         find: "@nosis/agent-runtime",
         replacement: fileURLToPath(
           new URL("../../packages/agent-runtime/src/index.ts", import.meta.url)
         ),
       },
       {
-        find: "@nosis",
-        replacement: fileURLToPath(new URL("./src", import.meta.url)),
+        find: "@nosis/provider",
+        replacement: fileURLToPath(
+          new URL("../../packages/provider/src/index.ts", import.meta.url)
+        ),
+      },
+      {
+        find: /^@nosis\/components\/(.*)$/,
+        replacement: fileURLToPath(
+          new URL("./src/components/$1", import.meta.url)
+        ),
+      },
+      {
+        find: /^@nosis\/features\/(.*)$/,
+        replacement: fileURLToPath(
+          new URL("./src/features/$1", import.meta.url)
+        ),
+      },
+      {
+        find: /^@nosis\/lib\/(.*)$/,
+        replacement: fileURLToPath(new URL("./src/lib/$1", import.meta.url)),
       },
     ],
   },

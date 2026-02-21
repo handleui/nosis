@@ -128,6 +128,37 @@ describe("useConversations", () => {
     expect(result.current.conversations[0]?.id).toBe(conversationA.id);
   });
 
+  it("preserves explicit workspaceId null when defaults are set", async () => {
+    mockListConversations.mockResolvedValueOnce([]);
+    mockCreateConversation.mockResolvedValueOnce(conversationA);
+
+    const { result } = renderHook(() =>
+      useConversations({
+        executionTarget: "sandbox",
+        workspaceId: "workspace-1",
+        officeId: "office-1",
+      })
+    );
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    await act(async () => {
+      await result.current.createNewConversation({
+        title: "detached",
+        workspaceId: null,
+      });
+    });
+
+    expect(mockCreateConversation).toHaveBeenCalledWith({
+      title: "detached",
+      executionTarget: "sandbox",
+      workspaceId: null,
+      officeId: "office-1",
+    });
+  });
+
   it("exposes create errors and resets create state", async () => {
     mockListConversations.mockResolvedValueOnce([]);
     mockCreateConversation.mockRejectedValueOnce(new Error("Unauthorized"));

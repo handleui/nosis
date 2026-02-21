@@ -10,6 +10,8 @@ import {
 
 const TRIGGER_ERROR_RE = /trigger must be one of/;
 const SKILL_FORMAT_ERROR_RE = /Each skill ID must match/;
+const SKILL_TYPE_ERROR_RE = /skill_ids must be an array of strings/;
+const SKILL_COUNT_ERROR_RE = /skill_ids supports at most 12 entries/;
 const MESSAGE_COUNT_ERROR_RE = /messages supports at most 200 items/;
 const EXECUTION_TARGET_ERROR_RE = /execution_target must be/;
 const EMPTY_CONTENT_ERROR_RE = /Content must not be empty/;
@@ -38,6 +40,17 @@ test("validateChatSkillIds trims valid values and rejects invalid ids", () => {
   assert.throws(
     () => validateChatSkillIds(["tool first"]),
     SKILL_FORMAT_ERROR_RE
+  );
+});
+
+test("validateChatSkillIds enforces type and max size", () => {
+  assert.throws(() => validateChatSkillIds("tool-first"), SKILL_TYPE_ERROR_RE);
+  assert.throws(() => validateChatSkillIds([123]), SKILL_TYPE_ERROR_RE);
+
+  const tooManySkills = Array.from({ length: 13 }, () => "tool-first");
+  assert.throws(
+    () => validateChatSkillIds(tooManySkills),
+    SKILL_COUNT_ERROR_RE
   );
 });
 

@@ -48,6 +48,25 @@ describe("worker chat api", () => {
     expect(url).toContain("office_id=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
   });
 
+  it("omits nullable list filters when workspace is detached", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    await listConversations(50, 0, "sandbox", null, undefined);
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain(`${API_URL}/api/conversations?`);
+    expect(url).toContain("limit=50");
+    expect(url).toContain("offset=0");
+    expect(url).toContain("execution_target=sandbox");
+    expect(url).not.toContain("workspace_id=");
+    expect(url).not.toContain("office_id=");
+  });
+
   it("rejects invalid conversation ids for chat paths", () => {
     expect(() => conversationChatPath("bad-id")).toThrow(
       "Invalid conversation ID"
@@ -201,6 +220,13 @@ describe("worker chat api", () => {
     );
     expect(options.method).toBe("PATCH");
     expect(JSON.parse(String(options.body))).toEqual({ workspace_id: null });
+  });
+
+  it("rejects invalid workspace ids before sending workspace updates", async () => {
+    await expect(
+      setConversationWorkspace("11111111-2222-4333-8444-555555555555", "bad-id")
+    ).rejects.toThrow("Invalid workspace ID");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("sends execution-target updates", async () => {

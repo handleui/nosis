@@ -1,6 +1,6 @@
 import { API_URL } from "@nosis/lib/api-config";
 import type { UIMessage } from "ai";
-import type { CloudExecutionTarget } from "@nosis/agent-runtime";
+import type { CloudExecutionTarget } from "@nosis/agent-runtime/execution";
 import {
   assertUuid,
   safePagination,
@@ -73,18 +73,22 @@ export async function listConversations(
   officeId?: string
 ): Promise<Conversation[]> {
   const page = safePagination(limit, offset);
-  const targetQuery = executionTarget
-    ? `&execution_target=${encodeURIComponent(executionTarget)}`
-    : "";
-  const workspaceQuery = workspaceId
-    ? `&workspace_id=${encodeURIComponent(workspaceId)}`
-    : "";
-  const officeQuery = officeId
-    ? `&office_id=${encodeURIComponent(officeId)}`
-    : "";
+  const searchParams = new URLSearchParams({
+    limit: String(page.limit),
+    offset: String(page.offset),
+  });
+  if (executionTarget) {
+    searchParams.set("execution_target", executionTarget);
+  }
+  if (workspaceId) {
+    searchParams.set("workspace_id", workspaceId);
+  }
+  if (officeId) {
+    searchParams.set("office_id", officeId);
+  }
 
   return await workerJson<Conversation[]>(
-    `/api/conversations?limit=${page.limit}&offset=${page.offset}${targetQuery}${workspaceQuery}${officeQuery}`
+    `/api/conversations?${searchParams.toString()}`
   );
 }
 

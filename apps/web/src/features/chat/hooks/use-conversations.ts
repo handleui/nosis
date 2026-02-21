@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SANDBOX_EXECUTION_TARGET } from "@nosis/agent-runtime";
+import { SANDBOX_EXECUTION_TARGET } from "@nosis/agent-runtime/execution";
 import {
   type Conversation,
   type ConversationExecutionTarget,
@@ -22,12 +22,16 @@ interface UseConversationsResult {
   isCreating: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  createNewConversation: (options?: {
-    title?: string;
-    executionTarget?: ConversationExecutionTarget;
-    workspaceId?: string | null;
-    officeId?: string;
-  }) => Promise<Conversation>;
+  createNewConversation: (
+    options?: CreateConversationOptions
+  ) => Promise<Conversation>;
+}
+
+interface CreateConversationOptions {
+  title?: string;
+  executionTarget?: ConversationExecutionTarget;
+  workspaceId?: string | null;
+  officeId?: string;
 }
 
 function toConversationListError(error: unknown): string {
@@ -51,6 +55,16 @@ export function useConversations(
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+
+  const resolveWorkspaceId = useCallback(
+    (createOptions?: CreateConversationOptions) => {
+      if (!(createOptions && Object.hasOwn(createOptions, "workspaceId"))) {
+        return defaultWorkspaceId;
+      }
+      return createOptions.workspaceId;
+    },
+    [defaultWorkspaceId]
+  );
 
   const loadConversations = useCallback(
     async (showLoading: boolean) => {
@@ -100,12 +114,7 @@ export function useConversations(
   }, [loadConversations]);
 
   const createNewConversation = useCallback(
-    async (createOptions?: {
-      title?: string;
-      executionTarget?: ConversationExecutionTarget;
-      workspaceId?: string | null;
-      officeId?: string;
-    }) => {
+    async (createOptions?: CreateConversationOptions) => {
       setIsCreating(true);
       setError(null);
       try {
@@ -113,7 +122,7 @@ export function useConversations(
           title: createOptions?.title,
           executionTarget:
             createOptions?.executionTarget ?? defaultExecutionTarget,
-          workspaceId: createOptions?.workspaceId ?? defaultWorkspaceId,
+          workspaceId: resolveWorkspaceId(createOptions),
           officeId: createOptions?.officeId ?? defaultOfficeId,
         });
         setConversations((existing) => {
@@ -132,7 +141,7 @@ export function useConversations(
         setIsCreating(false);
       }
     },
-    [defaultExecutionTarget, defaultOfficeId, defaultWorkspaceId]
+    [defaultExecutionTarget, defaultOfficeId, resolveWorkspaceId]
   );
 
   return {

@@ -1,4 +1,4 @@
-import type { CloudExecutionTarget } from "@nosis/agent-runtime";
+import type { CloudExecutionTarget } from "@nosis/agent-runtime/execution";
 import type {
   conversations,
   offices,

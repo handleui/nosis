@@ -1,4 +1,3 @@
-import { safeValidateUIMessages, type UIMessage } from "ai";
 import { drizzle } from "drizzle-orm/d1";
 import { getMigrations } from "better-auth/db";
 import { Hono } from "hono";
@@ -8,8 +7,8 @@ import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { authorizeTool, checkAuthStatus, listTools } from "./arcade";
 import { createAuth } from "./auth";
-import { isChatSkillId } from "./chat-skills";
 import { streamChat } from "./chat";
+import { normalizeChatRequest } from "./chat-request";
 import { encryptApiKey } from "./crypto";
 import {
   type AppDatabase,
@@ -70,9 +69,6 @@ import {
   validateAgentId,
   validateApiKeyInput,
   validateBranchName,
-  validateChatMessageCount,
-  validateChatSkillIds,
-  validateChatTrigger,
   validateContent,
   validateMcpAuthType,
   validateMcpName,
@@ -89,7 +85,6 @@ import {
   validateRepoName,
   validateRole,
   validateNullableUuid,
-  validateOptionalContent,
   validateWorkspaceKind,
   validateWorkspaceName,
   validateWorkspaceStatus,
@@ -926,37 +921,8 @@ app.post(
     const userId = getUserId(c);
     const conversationId = validateUuid(c.req.param("id"));
     const body = await parseJsonBody(c);
-    const content = validateOptionalContent(body.content);
-    const trigger = validateChatTrigger(body.trigger);
-    const requestedSkillIds = validateChatSkillIds(body.skill_ids);
-    const skillIds = requestedSkillIds.filter(isChatSkillId);
-    const unknownSkillIds = requestedSkillIds.filter(
-      (id) => !isChatSkillId(id)
-    );
-    if (unknownSkillIds.length > 0) {
-      throw new HTTPException(400, {
-        message: `Unknown skill_ids: ${unknownSkillIds.join(", ")}`,
-      });
-    }
-
-    let messages: UIMessage[] | undefined;
-
-    if (body.messages !== undefined) {
-      const parsed = await safeValidateUIMessages({ messages: body.messages });
-      if (!parsed.success) {
-        throw new HTTPException(400, {
-          message: `Invalid messages payload: ${parsed.error.message}`,
-        });
-      }
-      validateChatMessageCount(parsed.data.length);
-      messages = parsed.data;
-    }
-
-    if (!(messages || content)) {
-      throw new HTTPException(400, {
-        message: "Provide either messages or content",
-      });
-    }
+    const { content, trigger, skillIds, messages } =
+      await normalizeChatRequest(body);
 
     const conversation = await getConversation(appDb, conversationId, userId);
     const officeId = conversation.office_id;

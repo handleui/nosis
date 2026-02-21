@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Database,
@@ -15,6 +15,12 @@ import {
   SidebarCollapse,
   SidebarExpand,
 } from "iconoir-react";
+import {
+  TooltipContent,
+  TooltipProvider,
+  TooltipRoot,
+  TooltipTrigger,
+} from "@nosis/ui/tooltip";
 import { Avatar, AvatarFallback, AvatarImage, Facehash } from "facehash";
 import type { Conversation } from "@nosis/features/chat/api/worker-chat-api";
 import type {
@@ -103,14 +109,14 @@ function getConversationStats(
 
 function FacehashSquare({ seed }: { seed: string }) {
   return (
-    <div className="size-5 overflow-hidden rounded-[4px]">
+    <div className="size-4 overflow-hidden rounded-[4px]">
       <Facehash
         colors={[...FACEHASH_COLORS]}
         intensity3d="subtle"
         interactive={false}
         name={seed}
         showInitial={false}
-        size={20}
+        size={16}
         variant="solid"
       />
     </div>
@@ -156,11 +162,11 @@ function WorkspaceHeader({
 }) {
   return (
     <div
-      className={`flex h-10 items-center justify-between ${
-        isCollapsed ? "px-2" : "px-4"
+      className={`flex h-10 items-center ${
+        isCollapsed ? "justify-center px-2" : "justify-between px-4"
       }`}
     >
-      <div className="flex items-center gap-2.5">
+      <div className={`flex items-center ${isCollapsed ? "" : "gap-2.5"}`}>
         <FacehashSquare seed={officeSeed} />
         {isCollapsed ? null : (
           <>
@@ -173,18 +179,16 @@ function WorkspaceHeader({
         )}
       </div>
 
-      <button
-        aria-label="Toggle sidebar"
-        className="flex size-4 items-center justify-center"
-        onClick={onToggleSidebar}
-        type="button"
-      >
-        {isCollapsed ? (
-          <SidebarExpand className="size-4 text-[#808080]" />
-        ) : (
+      {isCollapsed ? null : (
+        <button
+          aria-label="Toggle sidebar"
+          className="flex size-4 items-center justify-center"
+          onClick={onToggleSidebar}
+          type="button"
+        >
           <SidebarCollapse className="size-4 text-[#808080]" />
-        )}
-      </button>
+        </button>
+      )}
     </div>
   );
 }
@@ -222,35 +226,54 @@ function SidebarButton({
   collapsed?: boolean;
 }) {
   const toneClass = selected ? "text-[#0080ff]" : "text-black";
-  const iconSizeClass = item === "habits" ? "size-[18px]" : "size-4";
+  const iconSizeClass = "size-4";
   const buttonClass = collapsed
-    ? `flex size-8 items-center justify-center rounded-[6px] ${
+    ? `flex size-8 items-center justify-center rounded-[12px] ${
         selected ? "bg-[#f6fbff]" : "hover:bg-[#f7f7f7]"
       }`
-    : `flex h-8 w-full items-center gap-3 rounded-[4px] px-2 text-left ${
+    : `flex h-8 w-full items-center gap-3 rounded-[8px] px-2 text-left ${
         selected ? "bg-[#f6fbff]" : "hover:bg-[#f7f7f7]"
       }`;
 
+  if (collapsed) {
+    return (
+      <div className="flex justify-center py-0.5">
+        <TooltipRoot>
+          <TooltipTrigger
+            aria-label={label}
+            className={buttonClass}
+            onClick={onClick}
+          >
+            <SidebarIcon
+              className={`${iconSizeClass} shrink-0 ${toneClass}`}
+              item={item}
+            />
+          </TooltipTrigger>
+          <TooltipContent
+            className="rounded-[8px] px-2 py-1"
+            side="right"
+            sideOffset={12}
+          >
+            {label}
+          </TooltipContent>
+        </TooltipRoot>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={collapsed ? "flex justify-center py-1" : "w-full px-2 py-1"}
-    >
+    <div className="w-full px-2 py-0.5">
       <button
         aria-label={label}
         className={buttonClass}
         onClick={onClick}
-        title={label}
         type="button"
       >
         <SidebarIcon
           className={`${iconSizeClass} shrink-0 ${toneClass}`}
           item={item}
         />
-        {collapsed ? null : (
-          <p className={`text-[13px] tracking-[-0.39px] ${toneClass}`}>
-            {label}
-          </p>
-        )}
+        <p className={`text-[13px] tracking-[-0.39px] ${toneClass}`}>{label}</p>
       </button>
     </div>
   );
@@ -460,81 +483,125 @@ export default function AppSidebar({
     return projectGroups;
   }, [codeThreads, isProjectsLoading, projects, workspaceById]);
 
+  const handleOpenChat = useCallback(() => {
+    if (pathname !== "/" && !pathname.startsWith("/chat")) {
+      router.push("/");
+    }
+  }, [pathname, router]);
+
+  const handleOpenCode = useCallback(() => {
+    if (!pathname.startsWith("/code")) {
+      router.push("/code");
+    }
+  }, [pathname, router]);
+
+  const handleOpenNewProject = useCallback(() => {
+    router.push("/code/new");
+  }, [router]);
+  const handleOpenDocs = useCallback(() => {
+    window.open("https://nosis.sh/docs", "_blank", "noopener,noreferrer");
+  }, []);
+
   const isCollapsed = !isSidebarOpen;
 
   if (isCollapsed) {
     return (
-      <div className="flex size-full flex-col justify-between bg-white">
-        <div className="border-[#f0f0f0] border-b pt-1 pb-2">
-          <WorkspaceHeader
-            isCollapsed
-            officeSeed={officeSeed}
-            onToggleSidebar={onToggleSidebar}
-          />
+      <TooltipProvider>
+        <div className="flex size-full flex-col justify-between bg-white">
+          <div className="border-[#f0f0f0] border-b pt-1 pb-2">
+            <WorkspaceHeader
+              isCollapsed
+              officeSeed={officeSeed}
+              onToggleSidebar={onToggleSidebar}
+            />
 
-          <div className="mt-1 flex flex-col items-center">
-            <SidebarButton
-              collapsed
-              item="habits"
-              label="Habits"
-              selected={false}
-            />
-            <SidebarButton
-              collapsed
-              item="integrations"
-              label="Integrations"
-              selected={false}
-            />
-            <SidebarButton
-              collapsed
-              item="chat"
-              label="Chat"
-              onClick={() => {
-                if (pathname !== "/" && !pathname.startsWith("/chat")) {
-                  router.push("/");
-                }
-              }}
-              selected={activeMode === "chat"}
-            />
-            <SidebarButton
-              collapsed
-              item="code"
-              label="Code"
-              onClick={() => {
-                if (!pathname.startsWith("/code")) {
-                  router.push("/code");
-                }
-              }}
-              selected={activeMode === "code"}
-            />
+            <div className="mt-1 flex flex-col items-center -space-y-1">
+              <SidebarButton
+                collapsed
+                item="habits"
+                label="Habits"
+                selected={false}
+              />
+              <SidebarButton
+                collapsed
+                item="integrations"
+                label="Integrations"
+                selected={false}
+              />
+              <SidebarButton
+                collapsed
+                item="chat"
+                label="Chat"
+                onClick={handleOpenChat}
+                selected={activeMode === "chat"}
+              />
+              <SidebarButton
+                collapsed
+                item="code"
+                label="Code"
+                onClick={handleOpenCode}
+                selected={activeMode === "code"}
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center gap-3 border-[#f1f1f2] border-t py-3">
+            <TooltipRoot>
+              <TooltipTrigger
+                aria-label="Add Project"
+                className="flex size-8 items-center justify-center rounded-[12px] hover:bg-[#f7f7f7]"
+                onClick={handleOpenNewProject}
+              >
+                <FolderPlus className="size-4 text-black" />
+              </TooltipTrigger>
+              <TooltipContent
+                className="rounded-[8px] px-2 py-1"
+                side="right"
+                sideOffset={12}
+              >
+                Add Project
+              </TooltipContent>
+            </TooltipRoot>
+
+            <TooltipRoot>
+              <TooltipTrigger
+                aria-label="Open docs"
+                className="flex size-8 items-center justify-center rounded-[12px] hover:bg-[#f7f7f7]"
+                onClick={handleOpenDocs}
+              >
+                <OpenBook className="size-4 text-[#808080]" />
+              </TooltipTrigger>
+              <TooltipContent
+                className="rounded-[8px] px-2 py-1"
+                side="right"
+                sideOffset={12}
+              >
+                Docs
+              </TooltipContent>
+            </TooltipRoot>
+
+            <TooltipRoot>
+              <TooltipTrigger
+                aria-label="Expand sidebar"
+                className="group relative flex size-8 items-center justify-center rounded-[12px] hover:bg-[#f7f7f7]"
+                onClick={onToggleSidebar}
+              >
+                <span className="transition-opacity duration-150 group-hover:opacity-0">
+                  <UserAvatarSquare imageUrl={userImage} seed={userSeed} />
+                </span>
+                <SidebarExpand className="pointer-events-none absolute size-4 text-[#808080] opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
+              </TooltipTrigger>
+              <TooltipContent
+                className="rounded-[8px] px-2 py-1"
+                side="right"
+                sideOffset={12}
+              >
+                Expand Sidebar
+              </TooltipContent>
+            </TooltipRoot>
           </div>
         </div>
-
-        <div className="flex flex-col items-center gap-3 border-[#f1f1f2] border-t py-3">
-          <button
-            aria-label="Add Project"
-            className="flex size-8 items-center justify-center rounded-[6px] hover:bg-[#f7f7f7]"
-            onClick={() => router.push("/code/new")}
-            title="Add Project"
-            type="button"
-          >
-            <FolderPlus className="size-4 text-black" />
-          </button>
-
-          <a
-            aria-label="Open docs"
-            className="flex size-8 items-center justify-center rounded-[6px] hover:bg-[#f7f7f7]"
-            href="https://nosis.sh/docs"
-            rel="noopener"
-            target="_blank"
-            title="Docs"
-          >
-            <OpenBook className="size-4 text-[#808080]" />
-          </a>
-
-          <UserAvatarSquare imageUrl={userImage} seed={userSeed} />
-        </div>
-      </div>
+      </TooltipProvider>
     );
   }
 
@@ -548,32 +615,26 @@ export default function AppSidebar({
             onToggleSidebar={onToggleSidebar}
           />
 
-          <SidebarButton item="habits" label="Habits" selected={false} />
-          <SidebarButton
-            item="integrations"
-            label="Integrations"
-            selected={false}
-          />
-          <SidebarButton
-            item="chat"
-            label="Chat"
-            onClick={() => {
-              if (pathname !== "/" && !pathname.startsWith("/chat")) {
-                router.push("/");
-              }
-            }}
-            selected={activeMode === "chat"}
-          />
-          <SidebarButton
-            item="code"
-            label="Code"
-            onClick={() => {
-              if (!pathname.startsWith("/code")) {
-                router.push("/code");
-              }
-            }}
-            selected={activeMode === "code"}
-          />
+          <div className="-space-y-1">
+            <SidebarButton item="habits" label="Habits" selected={false} />
+            <SidebarButton
+              item="integrations"
+              label="Integrations"
+              selected={false}
+            />
+            <SidebarButton
+              item="chat"
+              label="Chat"
+              onClick={handleOpenChat}
+              selected={activeMode === "chat"}
+            />
+            <SidebarButton
+              item="code"
+              label="Code"
+              onClick={handleOpenCode}
+              selected={activeMode === "code"}
+            />
+          </div>
         </div>
 
         <div className="min-h-0 overflow-y-auto">
@@ -679,7 +740,7 @@ export default function AppSidebar({
       <div className="flex h-10 items-center justify-between border-[#f1f1f2] border-t py-2 pr-[10px] pl-4">
         <button
           className="flex items-center gap-2"
-          onClick={() => router.push("/code/new")}
+          onClick={handleOpenNewProject}
           type="button"
         >
           <FolderPlus className="size-4 text-black" />

@@ -20,7 +20,12 @@
     ],
     "paths": {
       "@nosis/agent-runtime": ["../../packages/agent-runtime/src/index.ts"],
-      "@nosis/*": ["./src/*"]
+      "@nosis/agent-runtime/execution": [
+        "../../packages/agent-runtime/src/execution.ts"
+      ],
+      "@nosis/components/*": ["./src/components/*"],
+      "@nosis/features/*": ["./src/features/*"],
+      "@nosis/lib/*": ["./src/lib/*"]
     }
   },
   "include": [

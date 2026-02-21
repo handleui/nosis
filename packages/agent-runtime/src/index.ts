@@ -1,81 +1,33 @@
 import { streamText, type ToolSet } from "ai";
 import {
+  SANDBOX_EXECUTION_TARGET,
+  type SandboxExecutionTarget,
+} from "./execution";
+import type {
+  AgentIdRegistry,
+  MessagePersistence,
+  RuntimeErrorReporter,
+  RuntimeScheduler,
+  RuntimeTools,
+  ToolLoader,
+} from "./contracts";
+import {
   createAgent,
   createProvider,
   type LettaProvider,
 } from "@nosis/provider";
 
-export const SANDBOX_EXECUTION_TARGET = "sandbox" as const;
-export const LOCAL_EXECUTION_TARGET = "local" as const;
-export const LEGACY_DEFAULT_EXECUTION_TARGET = "default" as const;
-
-export type SharedExecutionTarget =
-  | typeof SANDBOX_EXECUTION_TARGET
-  | typeof LOCAL_EXECUTION_TARGET;
-export type CloudExecutionTarget = typeof SANDBOX_EXECUTION_TARGET;
-export type StoredCloudExecutionTarget =
-  | CloudExecutionTarget
-  | typeof LEGACY_DEFAULT_EXECUTION_TARGET;
-export type DesktopExecutionTarget = SharedExecutionTarget;
-export type ExecutionSurface = "worker" | "web" | "desktop";
-export type SandboxExecutionTarget = typeof SANDBOX_EXECUTION_TARGET;
-
-export function canonicalizeExecutionTarget(
-  _value: string | null | undefined
-): SandboxExecutionTarget {
-  if (
-    _value === undefined ||
-    _value === null ||
-    _value === "" ||
-    _value === SANDBOX_EXECUTION_TARGET ||
-    _value === LEGACY_DEFAULT_EXECUTION_TARGET
-  ) {
-    return SANDBOX_EXECUTION_TARGET;
-  }
-
-  throw new Error(
-    `Unsupported cloud execution target: ${_value}. Worker supports sandbox only.`
-  );
-}
-
-export function supportsExecutionTargetOnSurface(
-  target: SharedExecutionTarget,
-  surface: ExecutionSurface
-): boolean {
-  if (surface === "desktop") {
-    return (
-      target === SANDBOX_EXECUTION_TARGET || target === LOCAL_EXECUTION_TARGET
-    );
-  }
-  return target === SANDBOX_EXECUTION_TARGET;
-}
-
-export function supportedExecutionTargetsForSurface(
-  surface: ExecutionSurface
-): readonly SharedExecutionTarget[] {
-  if (surface === "desktop") {
-    return [SANDBOX_EXECUTION_TARGET, LOCAL_EXECUTION_TARGET];
-  }
-  return [SANDBOX_EXECUTION_TARGET];
-}
-
-export interface AgentTools {
+export interface AgentTools extends RuntimeTools {
   tools: ToolSet;
-  cleanup: () => Promise<void>;
 }
 
-export interface AgentPersistence {
-  getExistingAgentId: () => Promise<string | null>;
-  claimAgentId: (agentId: string) => Promise<boolean>;
-  getWinningAgentId: () => Promise<string | null>;
-  saveUserMessage: (content: string) => Promise<void>;
-  saveAssistantMessage: (content: string) => Promise<void>;
-}
+export interface AgentPersistence extends AgentIdRegistry, MessagePersistence {}
 
-export interface AgentRuntimeHooks {
+export interface AgentRuntimeHooks
+  extends RuntimeScheduler,
+    RuntimeErrorReporter,
+    Omit<ToolLoader, "loadTools"> {
   loadTools: (executionTarget: SandboxExecutionTarget) => Promise<AgentTools>;
-  schedule: (task: Promise<void>) => void;
-  onError: (message: string, error: unknown) => void;
 }
 
 export interface StreamAgentChatInput {

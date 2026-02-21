@@ -23,13 +23,14 @@ This document tracks the architecture migration toward a shared Letta runtime pa
 - Split by workspace attachment, not by ambiguous execution labels.
 - Keep explicit `workspaceId: null` support so chat threads remain detached from code workspaces.
 
-## Phase 4 - Adapter Boundaries (next)
+## Phase 4 - Adapter Boundaries (in progress)
 
 - Define a runtime adapter contract in `@nosis/agent-runtime` for:
   - message persistence
   - tool loading
   - background task scheduling
   - error reporting
+- Implemented shared contract module: `@nosis/agent-runtime/contracts`.
 - Keep worker as control plane/runtime host for now.
 - Defer desktop runtime adapter implementation to a later milestone.
 
@@ -40,6 +41,7 @@ This document tracks the architecture migration toward a shared Letta runtime pa
   - desktop-visible targets: `sandbox`, `local`
 - Keep worker validation sandbox-only while tolerating legacy `default` input.
 - Make web hooks default to sandbox filtering so future desktop-local threads do not leak into web lists.
+- Use shared execution constants/types via `@nosis/agent-runtime/execution` and explicit package alias precedence.
 - Keep desktop local execution as a follow-up implementation, not part of this PR.
 
 ## Phase 5 - Office Ownership Hardening (in progress)

@@ -10,10 +10,8 @@ import {
   type ToolSet,
   type UIMessage,
 } from "ai";
-import {
-  canonicalizeExecutionTarget,
-  resolveOrCreateAgentId,
-} from "@nosis/agent-runtime";
+import { resolveOrCreateAgentId } from "@nosis/agent-runtime";
+import { canonicalizeExecutionTarget } from "@nosis/agent-runtime/execution";
 import { createProvider } from "@nosis/provider";
 import { HTTPException } from "hono/http-exception";
 import { buildSkillSystemPrompt, type ChatSkillId } from "./chat-skills";
