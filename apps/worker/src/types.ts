@@ -4,6 +4,9 @@ import type { conversations, mcpServers, messages } from "./schema";
 
 export interface Bindings {
   ENVIRONMENT?: string;
+  DAYTONA_API_KEY?: string;
+  DAYTONA_API_URL?: string;
+  DAYTONA_TARGET?: string;
   EXA_API_KEY?: string;
   FIRECRAWL_API_KEY?: string;
   LETTA_API_KEY?: string;
@@ -69,6 +72,48 @@ export interface ScrapeResponse {
   markdown: string;
   title: string | null;
   sourceURL: string;
+}
+
+// ── Daytona (Sandboxes) ──
+
+export type DaytonaSandboxLanguage = "python" | "typescript" | "javascript";
+
+export interface DaytonaCreateSandboxRequest {
+  name?: string;
+  language?: DaytonaSandboxLanguage;
+  autoStopInterval?: number;
+  timeout?: number;
+  envVars?: Record<string, string>;
+}
+
+export interface DaytonaExecuteRequest {
+  command: string;
+  cwd?: string;
+  env?: Record<string, string>;
+  timeout?: number;
+}
+
+export interface DaytonaSandboxSummary {
+  id: string;
+  name: string;
+  state: string | null;
+  target: string;
+  autoStopInterval: number | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface DaytonaListSandboxesResponse {
+  items: DaytonaSandboxSummary[];
+  total: number;
+  page: number;
+  totalPages: number;
+}
+
+export interface DaytonaExecuteResponse {
+  exitCode: number;
+  result: string;
+  stdout: string;
 }
 
 // ── Conversations ──

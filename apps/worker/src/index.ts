@@ -26,6 +26,14 @@ import {
   updateConversationTitle,
   upsertUserApiKey,
 } from "./db";
+import {
+  createDaytonaSandbox,
+  deleteDaytonaSandbox,
+  executeDaytonaSandboxCommand,
+  listDaytonaSandboxes,
+  startDaytonaSandbox,
+  stopDaytonaSandbox,
+} from "./daytona";
 import { searchExa, validateSearchRequest } from "./exa";
 import { scrapeUrl, validateScrapeRequest } from "./firecrawl";
 import { resolveUserApiKey } from "./keys";
@@ -41,9 +49,14 @@ import * as schema from "./schema";
 import type { Bindings } from "./types";
 import {
   parseJsonBody,
+  requestHasBody,
   validateAgentId,
   validateApiKeyInput,
   validateContent,
+  validateDaytonaCreateSandboxRequest,
+  validateDaytonaExecuteRequest,
+  validateDaytonaSandboxId,
+  validateDaytonaTimeoutSeconds,
   validateMcpAuthType,
   validateMcpName,
   validateMcpUrl,
@@ -61,6 +74,40 @@ const MAX_MESSAGE_BYTES = 512 * 1024;
 
 function db(env: Bindings): AppDatabase {
   return drizzle(env.DB, { schema });
+}
+
+async function resolveDaytonaApiKey(
+  d: AppDatabase,
+  env: Bindings,
+  userId: string
+): Promise<string> {
+  try {
+    return await resolveUserApiKey(
+      d,
+      env.BETTER_AUTH_SECRET,
+      userId,
+      "daytona"
+    );
+  } catch (error) {
+    if (
+      error instanceof HTTPException &&
+      error.status === 422 &&
+      env.DAYTONA_API_KEY
+    ) {
+      return env.DAYTONA_API_KEY;
+    }
+    throw error;
+  }
+}
+
+function daytonaClientOptions(env: Bindings): {
+  apiUrl?: string;
+  target?: string;
+} {
+  return {
+    apiUrl: env.DAYTONA_API_URL,
+    target: env.DAYTONA_TARGET,
+  };
 }
 
 const app = new Hono<{
@@ -131,8 +178,9 @@ app.use(async (c, next) => {
   const isMutation =
     method === "POST" || method === "PATCH" || method === "PUT";
   if (isMutation) {
+    const hasBody = requestHasBody(c.req.raw.headers);
     const ct = c.req.header("content-type") ?? "";
-    if (!ct.startsWith("application/json")) {
+    if (hasBody && !ct.startsWith("application/json")) {
       throw new HTTPException(415, {
         message: "Content-Type must be application/json",
       });
@@ -220,6 +268,149 @@ app.post(
     return c.json(result);
   }
 );
+
+// ── Daytona Sandboxes ──
+
+app.get("/api/sandboxes", async (c) => {
+  const userId = getUserId(c);
+  const { limit, offset } = validatePagination(
+    c.req.query("limit"),
+    c.req.query("offset")
+  );
+  if (offset % limit !== 0) {
+    throw new HTTPException(400, {
+      message: "offset must be a multiple of limit for sandbox pagination",
+    });
+  }
+  const page = Math.floor(offset / limit) + 1;
+
+  const d = db(c.env);
+  const apiKey = await resolveDaytonaApiKey(d, c.env, userId);
+  const result = await listDaytonaSandboxes(
+    apiKey,
+    userId,
+    daytonaClientOptions(c.env),
+    page,
+    limit
+  );
+
+  return c.json(result);
+});
+
+app.post(
+  "/api/sandboxes",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const body = await parseJsonBody(c);
+    const request = validateDaytonaCreateSandboxRequest(body);
+
+    const d = db(c.env);
+    const apiKey = await resolveDaytonaApiKey(d, c.env, userId);
+    const sandbox = await createDaytonaSandbox(
+      apiKey,
+      userId,
+      request,
+      daytonaClientOptions(c.env)
+    );
+    return c.json(sandbox, 201);
+  }
+);
+
+app.post(
+  "/api/sandboxes/:id/execute",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const sandboxId = validateDaytonaSandboxId(c.req.param("id"));
+    const body = await parseJsonBody(c);
+    const request = validateDaytonaExecuteRequest(body);
+
+    const d = db(c.env);
+    const apiKey = await resolveDaytonaApiKey(d, c.env, userId);
+    const result = await executeDaytonaSandboxCommand(
+      apiKey,
+      userId,
+      sandboxId,
+      request,
+      daytonaClientOptions(c.env)
+    );
+
+    return c.json(result);
+  }
+);
+
+app.post(
+  "/api/sandboxes/:id/start",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const sandboxId = validateDaytonaSandboxId(c.req.param("id"));
+    let timeoutInput: unknown = c.req.query("timeout");
+    if (timeoutInput === undefined && requestHasBody(c.req.raw.headers)) {
+      const body = await parseJsonBody(c);
+      timeoutInput = body.timeout;
+    }
+    const timeout = validateDaytonaTimeoutSeconds(timeoutInput);
+
+    const d = db(c.env);
+    const apiKey = await resolveDaytonaApiKey(d, c.env, userId);
+    const sandbox = await startDaytonaSandbox(
+      apiKey,
+      userId,
+      sandboxId,
+      timeout,
+      daytonaClientOptions(c.env)
+    );
+
+    return c.json(sandbox);
+  }
+);
+
+app.post(
+  "/api/sandboxes/:id/stop",
+  bodyLimit({ maxSize: MAX_REQUEST_BYTES }),
+  async (c) => {
+    const userId = getUserId(c);
+    const sandboxId = validateDaytonaSandboxId(c.req.param("id"));
+    let timeoutInput: unknown = c.req.query("timeout");
+    if (timeoutInput === undefined && requestHasBody(c.req.raw.headers)) {
+      const body = await parseJsonBody(c);
+      timeoutInput = body.timeout;
+    }
+    const timeout = validateDaytonaTimeoutSeconds(timeoutInput);
+
+    const d = db(c.env);
+    const apiKey = await resolveDaytonaApiKey(d, c.env, userId);
+    const sandbox = await stopDaytonaSandbox(
+      apiKey,
+      userId,
+      sandboxId,
+      timeout,
+      daytonaClientOptions(c.env)
+    );
+
+    return c.json(sandbox);
+  }
+);
+
+app.delete("/api/sandboxes/:id", async (c) => {
+  const userId = getUserId(c);
+  const sandboxId = validateDaytonaSandboxId(c.req.param("id"));
+  const timeout = validateDaytonaTimeoutSeconds(c.req.query("timeout"));
+
+  const d = db(c.env);
+  const apiKey = await resolveDaytonaApiKey(d, c.env, userId);
+  await deleteDaytonaSandbox(
+    apiKey,
+    userId,
+    sandboxId,
+    timeout,
+    daytonaClientOptions(c.env)
+  );
+
+  return c.json({ ok: true });
+});
 
 // ── MCP Servers ──
 
@@ -488,6 +679,7 @@ app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 app.onError((err, c) => {
   const secrets = [
+    c.env.DAYTONA_API_KEY,
     c.env.LETTA_API_KEY,
     c.env.EXA_API_KEY,
     c.env.FIRECRAWL_API_KEY,
