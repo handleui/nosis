@@ -4,5 +4,27 @@
     "ultracite/biome/core",
     "ultracite/biome/svelte",
     "ultracite/biome/next"
+  ],
+  "overrides": [
+    {
+      // Figma-generated mockup pages — temporary placeholder assets will be
+      // replaced with proper SVG icons / next/image once designs are final.
+      "includes": [
+        "apps/web/src/app/code/layout.tsx",
+        "apps/web/src/app/code/page.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": { "useImageSize": "off" },
+          "performance": { "noImgElement": "off" }
+        }
+      }
+    },
+    {
+      // Drizzle meta/sql files are generated artifacts.
+      "includes": ["apps/worker/drizzle/**"],
+      "formatter": { "enabled": false },
+      "linter": { "enabled": false }
+    }
   ]
 }

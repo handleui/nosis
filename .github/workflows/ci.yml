@@ -40,6 +40,14 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Web tests
+        run: bun run --filter=nosis-web test
+
+      - name: Worker tests
+        run: |
+          cd apps/worker
+          bun test tests/*.test.ts
+
       - name: Lint & check types & build (PR)
         if: github.event_name == 'pull_request'
         run: bun turbo run lint check-types build --affected

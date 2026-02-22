@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { HTTPException } from "hono/http-exception";
 import { decryptApiKey } from "./crypto";
 import type { AppDatabase } from "./db";
-import { userApiKeys } from "./schema";
+import { offices, userApiKeys } from "./schema";
 import type { ApiProvider } from "./validate";
 
 const PROVIDER_LABELS: Record<ApiProvider, string> = {
@@ -12,17 +12,23 @@ const PROVIDER_LABELS: Record<ApiProvider, string> = {
   letta: "Letta",
 };
 
-export async function resolveUserApiKey(
+export async function resolveOfficeApiKey(
   db: AppDatabase,
   secret: string,
+  officeId: string,
   userId: string,
   provider: ApiProvider
 ): Promise<string> {
   const row = await db
     .select({ encrypted_key: userApiKeys.encrypted_key })
     .from(userApiKeys)
+    .innerJoin(offices, eq(offices.id, userApiKeys.user_id))
     .where(
-      and(eq(userApiKeys.user_id, userId), eq(userApiKeys.provider, provider))
+      and(
+        eq(userApiKeys.user_id, officeId),
+        eq(offices.user_id, userId),
+        eq(userApiKeys.provider, provider)
+      )
     )
     .get();
 
@@ -33,5 +39,5 @@ export async function resolveUserApiKey(
     });
   }
 
-  return decryptApiKey(secret, userId, row.encrypted_key);
+  return decryptApiKey(secret, officeId, row.encrypted_key);
 }

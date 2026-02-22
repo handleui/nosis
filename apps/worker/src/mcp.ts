@@ -4,7 +4,12 @@ import { and, eq, inArray } from "drizzle-orm";
 import { decryptApiKey } from "./crypto";
 import { type AppDatabase, listMcpServers } from "./db";
 import { userApiKeys } from "./schema";
-import type { Bindings, McpServer } from "./types";
+import type {
+  Bindings,
+  ConversationExecutionTarget,
+  McpServer,
+  McpServerScope,
+} from "./types";
 
 const ARCADE_GATEWAY_URL = "https://api.arcade.dev/mcp/nosis";
 
@@ -13,10 +18,16 @@ export interface McpToolsResult {
   cleanup: () => Promise<void>;
 }
 
+function scopesForExecutionTarget(
+  _executionTarget: ConversationExecutionTarget
+): readonly McpServerScope[] {
+  return ["global", "sandbox"];
+}
+
 /** Batch-fetch all encrypted API keys for the given MCP server IDs in one query. */
 async function fetchServerKeys(
   db: AppDatabase,
-  userId: string,
+  officeId: string,
   serverIds: string[]
 ): Promise<Map<string, string>> {
   if (serverIds.length === 0) {
@@ -32,7 +43,7 @@ async function fetchServerKeys(
     .from(userApiKeys)
     .where(
       and(
-        eq(userApiKeys.user_id, userId),
+        eq(userApiKeys.user_id, officeId),
         inArray(userApiKeys.provider, providers)
       )
     );
@@ -48,7 +59,7 @@ async function fetchServerKeys(
 
 async function connectUserServer(
   env: Bindings,
-  userId: string,
+  officeId: string,
   server: McpServer,
   encryptedKey: string | undefined
 ): Promise<MCPClient> {
@@ -57,7 +68,7 @@ async function connectUserServer(
   if (server.auth_type === "api_key" && encryptedKey) {
     const apiKey = await decryptApiKey(
       env.BETTER_AUTH_SECRET,
-      userId,
+      officeId,
       encryptedKey
     );
     headers.Authorization = `Bearer ${apiKey}`;
@@ -75,17 +86,20 @@ async function connectUserServer(
 export async function getActiveTools(
   db: AppDatabase,
   env: Bindings,
-  userId: string
+  userId: string,
+  officeId: string,
+  executionTarget: ConversationExecutionTarget
 ): Promise<McpToolsResult> {
   const clients: MCPClient[] = [];
   const tools: ToolSet = {};
 
   // Fetch user servers + batch-load their API keys (1 query instead of N)
-  const servers = await listMcpServers(db, userId);
+  const scopes = scopesForExecutionTarget(executionTarget);
+  const servers = await listMcpServers(db, userId, scopes);
   const authServerIds = servers
     .filter((s) => s.auth_type === "api_key")
     .map((s) => s.id);
-  const keyMap = await fetchServerKeys(db, userId, authServerIds);
+  const keyMap = await fetchServerKeys(db, officeId, authServerIds);
 
   // Connect to Arcade and all user servers in parallel
   const connectionTasks: Promise<{ client: MCPClient; tools: ToolSet }>[] = [];
@@ -106,8 +120,12 @@ export async function getActiveTools(
   }
 
   for (const server of servers) {
+    const encryptedKey = keyMap.get(server.id);
+    if (server.auth_type === "api_key" && !encryptedKey) {
+      continue;
+    }
     connectionTasks.push(
-      connectUserServer(env, userId, server, keyMap.get(server.id)).then(
+      connectUserServer(env, officeId, server, encryptedKey).then(
         async (client) => ({ client, tools: await client.tools() })
       )
     );

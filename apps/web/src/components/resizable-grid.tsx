@@ -15,7 +15,7 @@ import {
 
 export interface ResizableGridHandle {
   setWidths: (left: number, right: number, duration?: number) => void;
-  readonly widths: { left: number; right: number };
+  getWidths: () => { left: number; right: number };
 }
 
 interface ResizableGridProps {
@@ -25,6 +25,10 @@ interface ResizableGridProps {
   initialLeft?: number;
   initialRight?: number;
   onLeftCollapsedChange?: (collapsed: boolean) => void;
+  allowUserResize?: boolean;
+  allowLeftResize?: boolean;
+  allowRightResize?: boolean;
+  onWidthsChange?: (widths: { left: number; right: number }) => void;
 }
 
 const clamp = (min: number, value: number, max: number) =>
@@ -38,7 +42,8 @@ const CONSTRAINTS = {
 } as const;
 
 const COLLAPSE_THRESHOLD = 200;
-const EDGE_HITBOX_WIDTH = 64;
+const DRAG_HANDLE_WIDTH = 4;
+const DRAG_HANDLE_OFFSET = DRAG_HANDLE_WIDTH / 2;
 
 const normalizeProgress = (width: number, threshold: number) =>
   Math.min(1, Math.max(0, width / threshold));
@@ -64,7 +69,7 @@ const applySidebarStyles = (
   side: "left" | "right"
 ) => {
   if (handleEl) {
-    handleEl.style[side] = `${width - 4}px`;
+    handleEl.style[side] = `${width - DRAG_HANDLE_OFFSET}px`;
   }
   if (el) {
     const threshold = CONSTRAINTS[side].initial;
@@ -75,6 +80,7 @@ const applySidebarStyles = (
 
 interface DragHandleProps {
   side: "left" | "right";
+  enabled: boolean;
   isActive: boolean;
   position: number;
   onPointerDown: (e: PointerEvent<HTMLDivElement>) => void;
@@ -84,21 +90,34 @@ interface DragHandleProps {
 
 const DragHandle = ({
   side,
+  enabled,
   isActive,
   position,
   onPointerDown,
   onPointerEnter,
   onPointerLeave,
-}: DragHandleProps) => (
-  <div
-    className="drag-handle"
-    data-active={isActive ? "" : undefined}
-    onPointerDown={onPointerDown}
-    onPointerEnter={onPointerEnter}
-    onPointerLeave={onPointerLeave}
-    style={{ [side]: `${position - 4}px` }}
-  />
-);
+}: DragHandleProps) => {
+  let cursor: CSSProperties["cursor"] = "default";
+  if (enabled) {
+    cursor = isActive ? "grabbing" : "grab";
+  }
+
+  return (
+    <div
+      className="drag-handle"
+      data-active={isActive ? "" : undefined}
+      data-side={side}
+      onPointerDown={onPointerDown}
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
+      style={{
+        [side]: `${position - DRAG_HANDLE_OFFSET}px`,
+        cursor,
+        pointerEvents: enabled ? ("auto" as const) : ("none" as const),
+      }}
+    />
+  );
+};
 
 interface SidebarPanelProps {
   side: "left" | "right";
@@ -112,7 +131,7 @@ const SidebarPanel = ({ side, width, children }: SidebarPanelProps) => {
   return (
     <aside className="relative overflow-hidden" style={{ minWidth: 0 }}>
       <div
-        className={`scrollbar-hidden absolute top-0 ${isLeft ? "left-0" : "right-0 flex flex-col"} h-full overflow-y-auto`}
+        className={`scrollbar-hidden absolute top-0 ${isLeft ? "left-0" : "right-0 flex flex-col"} h-full overflow-y-auto overscroll-none`}
         data-sidebar-inner={side}
         style={{
           width: "100%",
@@ -128,37 +147,11 @@ const SidebarPanel = ({ side, width, children }: SidebarPanelProps) => {
   );
 };
 
-interface EdgeHitboxProps {
-  side: "left" | "right";
-  isActive: boolean;
-  onPointerDown: (e: PointerEvent<HTMLDivElement>) => void;
-}
-
-const EdgeHitbox = ({ side, isActive, onPointerDown }: EdgeHitboxProps) => {
-  const isLeft = side === "left";
-  return (
-    <div
-      onPointerDown={onPointerDown}
-      style={{
-        position: "absolute",
-        top: 0,
-        [isLeft ? "left" : "right"]: 0,
-        width: `${EDGE_HITBOX_WIDTH}px`,
-        height: "100%",
-        zIndex: 30,
-        cursor: "grab",
-        pointerEvents: isActive ? "auto" : ("none" as const),
-        userSelect: "none",
-        touchAction: "none",
-      }}
-    />
-  );
-};
-
 const useDragResize = (
   containerRef: RefObject<HTMLDivElement | null>,
   initialLeft: number,
-  initialRight: number
+  initialRight: number,
+  onWidthsChange?: (widths: { left: number; right: number }) => void
 ) => {
   const [activeHandle, setActiveHandle] = useState<"left" | "right" | null>(
     null
@@ -174,6 +167,7 @@ const useDragResize = (
   });
   const rafRef = useRef(0);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const onWidthsChangeRef = useRef(onWidthsChange);
   const elementsRef = useRef<{
     leftHandle: HTMLElement | null;
     rightHandle: HTMLElement | null;
@@ -187,6 +181,10 @@ const useDragResize = (
   });
 
   useEffect(() => {
+    onWidthsChangeRef.current = onWidthsChange;
+  }, [onWidthsChange]);
+
+  useEffect(() => {
     const el = containerRef.current;
     if (!el) {
       return;
@@ -195,8 +193,8 @@ const useDragResize = (
       el.querySelector<T>(selector);
 
     elementsRef.current = {
-      leftHandle: query(".drag-handle:first-of-type"),
-      rightHandle: query(".drag-handle:last-of-type"),
+      leftHandle: query(".drag-handle[data-side='left']"),
+      rightHandle: query(".drag-handle[data-side='right']"),
       leftInner: query("[data-sidebar-inner='left']"),
       rightInner: query("[data-sidebar-inner='right']"),
     };
@@ -232,6 +230,7 @@ const useDragResize = (
       elementsRef.current;
     applySidebarStyles(leftInner, lw, leftHandle, "left");
     applySidebarStyles(rightInner, rw, rightHandle, "right");
+    onWidthsChangeRef.current?.({ left: lw, right: rw });
   }, [containerRef]);
 
   const updateWidthOnDrag = useCallback(
@@ -334,6 +333,124 @@ const useDragResize = (
   return { activeHandle, hitboxActive, widthRef, startDrag, animateToWidths };
 };
 
+const resolveActiveHandle = ({
+  allowUserResize,
+  allowLeftResize,
+  allowRightResize,
+  activeHandle,
+}: {
+  allowUserResize: boolean;
+  allowLeftResize: boolean;
+  allowRightResize: boolean;
+  activeHandle: "left" | "right" | null;
+}): "left" | "right" | undefined => {
+  if (!allowUserResize) {
+    return undefined;
+  }
+  if (activeHandle === "left" && allowLeftResize) {
+    return "left";
+  }
+  if (activeHandle === "right" && allowRightResize) {
+    return "right";
+  }
+  return undefined;
+};
+
+const resolveHoveredHandle = ({
+  allowUserResize,
+  allowLeftResize,
+  allowRightResize,
+  activeHandle,
+  hoveredHandle,
+}: {
+  allowUserResize: boolean;
+  allowLeftResize: boolean;
+  allowRightResize: boolean;
+  activeHandle: "left" | "right" | null;
+  hoveredHandle: "left" | "right" | null;
+}): "left" | "right" | undefined => {
+  if (!allowUserResize || activeHandle) {
+    return undefined;
+  }
+  if (hoveredHandle === "left" && allowLeftResize) {
+    return "left";
+  }
+  if (hoveredHandle === "right" && allowRightResize) {
+    return "right";
+  }
+  return undefined;
+};
+
+interface ResizeControlsProps {
+  allowUserResize: boolean;
+  allowLeftResize: boolean;
+  allowRightResize: boolean;
+  activeHandle: "left" | "right" | null;
+  leftWidth: number;
+  rightWidth: number;
+  startDrag: (side: "left" | "right", e: PointerEvent<HTMLDivElement>) => void;
+  setHoveredHandle: (side: "left" | "right" | null) => void;
+}
+
+const ResizeControls = ({
+  allowUserResize,
+  allowLeftResize,
+  allowRightResize,
+  activeHandle,
+  leftWidth,
+  rightWidth,
+  startDrag,
+  setHoveredHandle,
+}: ResizeControlsProps) => {
+  if (!allowUserResize) {
+    return null;
+  }
+
+  const leftHandleEnabled = allowLeftResize && leftWidth > 0;
+  const rightHandleEnabled = allowRightResize && rightWidth > 0;
+
+  const handlePointerDown = (
+    side: "left" | "right",
+    enabled: boolean,
+    e: PointerEvent<HTMLDivElement>
+  ) => {
+    if (!enabled) {
+      return;
+    }
+    startDrag(side, e);
+  };
+
+  const handlePointerEnter = (side: "left" | "right", enabled: boolean) => {
+    if (!enabled || activeHandle) {
+      return;
+    }
+    setHoveredHandle(side);
+  };
+
+  return (
+    <>
+      <DragHandle
+        enabled={leftHandleEnabled}
+        isActive={activeHandle === "left"}
+        onPointerDown={(e) => handlePointerDown("left", leftHandleEnabled, e)}
+        onPointerEnter={() => handlePointerEnter("left", allowLeftResize)}
+        onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
+        position={leftWidth}
+        side="left"
+      />
+      <DragHandle
+        enabled={rightHandleEnabled}
+        isActive={activeHandle === "right"}
+        onPointerDown={(e) => handlePointerDown("right", rightHandleEnabled, e)}
+        onPointerEnter={() => handlePointerEnter("right", allowRightResize)}
+        onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
+        position={rightWidth}
+        side="right"
+      />
+    </>
+  );
+};
+
 const ResizableGrid = ({
   left,
   center,
@@ -341,6 +458,10 @@ const ResizableGrid = ({
   initialLeft,
   initialRight,
   onLeftCollapsedChange,
+  allowUserResize = true,
+  allowLeftResize = true,
+  allowRightResize = true,
+  onWidthsChange,
   ref,
 }: ResizableGridProps & { ref?: Ref<ResizableGridHandle> }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -351,8 +472,23 @@ const ResizableGrid = ({
     useDragResize(
       containerRef,
       initialLeft ?? CONSTRAINTS.left.initial,
-      initialRight ?? CONSTRAINTS.right.initial
+      initialRight ?? CONSTRAINTS.right.initial,
+      onWidthsChange
     );
+
+  const activeHandleAttr = resolveActiveHandle({
+    allowUserResize,
+    allowLeftResize,
+    allowRightResize,
+    activeHandle,
+  });
+  const hoveredHandleAttr = resolveHoveredHandle({
+    allowUserResize,
+    allowLeftResize,
+    allowRightResize,
+    activeHandle,
+    hoveredHandle,
+  });
 
   useEffect(() => {
     onLeftCollapsedChange?.(hitboxActive.left);
@@ -362,7 +498,7 @@ const ResizableGrid = ({
     ref,
     () => ({
       setWidths: animateToWidths,
-      get widths() {
+      getWidths() {
         return widthRef.current;
       },
     }),
@@ -372,10 +508,8 @@ const ResizableGrid = ({
   return (
     <div
       className="resizable-grid relative grid flex-1 overflow-hidden"
-      data-active-handle={activeHandle ?? undefined}
-      data-hovered-handle={
-        activeHandle ? undefined : (hoveredHandle ?? undefined)
-      }
+      data-active-handle={activeHandleAttr}
+      data-hovered-handle={hoveredHandleAttr}
       data-left-open={widthRef.current.left > 0 ? "" : undefined}
       data-right-open={widthRef.current.right > 0 ? "" : undefined}
       ref={containerRef}
@@ -390,7 +524,7 @@ const ResizableGrid = ({
             widthRef.current.right,
             CONSTRAINTS.right.initial
           ),
-          cursor: activeHandle ? "grabbing" : undefined,
+          cursor: allowUserResize && activeHandle ? "grabbing" : undefined,
         } as CSSProperties
       }
     >
@@ -398,38 +532,21 @@ const ResizableGrid = ({
         {left}
       </SidebarPanel>
 
-      <main className="scrollbar-hidden overflow-y-auto">{center}</main>
+      <main className="min-h-0 min-w-0 overflow-hidden">{center}</main>
 
       <SidebarPanel side="right" width={widthRef.current.right}>
         {right}
       </SidebarPanel>
 
-      <DragHandle
-        isActive={activeHandle === "left"}
-        onPointerDown={(e) => startDrag("left", e)}
-        onPointerEnter={() => !activeHandle && setHoveredHandle("left")}
-        onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
-        position={widthRef.current.left}
-        side="left"
-      />
-      <DragHandle
-        isActive={activeHandle === "right"}
-        onPointerDown={(e) => startDrag("right", e)}
-        onPointerEnter={() => !activeHandle && setHoveredHandle("right")}
-        onPointerLeave={() => !activeHandle && setHoveredHandle(null)}
-        position={widthRef.current.right}
-        side="right"
-      />
-
-      <EdgeHitbox
-        isActive={hitboxActive.left}
-        onPointerDown={(e) => startDrag("left", e)}
-        side="left"
-      />
-      <EdgeHitbox
-        isActive={hitboxActive.right}
-        onPointerDown={(e) => startDrag("right", e)}
-        side="right"
+      <ResizeControls
+        activeHandle={activeHandle}
+        allowLeftResize={allowLeftResize}
+        allowRightResize={allowRightResize}
+        allowUserResize={allowUserResize}
+        leftWidth={widthRef.current.left}
+        rightWidth={widthRef.current.right}
+        setHoveredHandle={setHoveredHandle}
+        startDrag={startDrag}
       />
     </div>
   );

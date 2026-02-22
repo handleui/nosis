@@ -1,188 +1,263 @@
 # Nosis Architecture
 
-Aggressively performant AI chat client for macOS. Turborepo monorepo with a Tauri 2 desktop app (Rust backend + Svelte frontend planned), a Next.js web client, and a Cloudflare Workers API.
+Nosis is a Turborepo monorepo with three active runtime surfaces:
 
-## Directory Layout
+- `apps/desktop` — Tauri desktop shell for macOS (wraps the web client)
+- `apps/web` — Next.js 16 web client (React 19)
+- `apps/worker` — Cloudflare Worker API (Hono + D1 + Better Auth)
 
-```
-nosis/
-├── apps/
-│   ├── desktop/               # Tauri desktop app
-│   │   ├── src/               # Frontend (TypeScript, served by Vite)
-│   │   │   ├── main.ts        # Entry point — dev globals, Escape dismiss
-│   │   │   ├── api.ts         # Worker API HTTP client (conversations, messages)
-│   │   │   ├── mcp-clients.ts # MCP client connections + tool discovery
-│   │   │   └── mcp-oauth.ts   # OAuth PKCE flow for MCP server auth
-│   │   ├── src-tauri/         # Backend (Rust)
-│   │   │   ├── src/
-│   │   │   │   ├── main.rs          # Binary entry — calls nosis_lib::run()
-│   │   │   │   ├── lib.rs           # Tauri builder, plugin setup, DB pool init
-│   │   │   │   ├── db.rs            # Versioned migration runner
-│   │   │   │   ├── error.rs         # AppError enum (thiserror + Serialize for IPC)
-│   │   │   │   ├── commands.rs      # Tauri IPC commands (secrets, placement, arcade, MCP)
-│   │   │   │   ├── arcade.rs        # Arcade AI tool integration
-│   │   │   │   ├── oauth_callback.rs # OAuth callback server for MCP auth
-│   │   │   │   ├── placement.rs     # Window placement modes
-│   │   │   │   ├── secrets.rs       # Encrypted secret store (iota_stronghold)
-│   │   │   │   └── util.rs          # String utilities
-│   │   │   ├── capabilities/
-│   │   │   │   └── default.json # Tauri permission grants for the main window
-│   │   │   ├── Cargo.toml      # Rust deps
-│   │   │   └── tauri.conf.json # Tauri config (build commands, CSP, window, plugins)
-│   │   ├── package.json        # Desktop app deps + scripts
-│   │   ├── vite.config.ts      # Vite dev server + build config
-│   │   └── tsconfig.json       # TypeScript config
-│   ├── web/                   # Next.js web client (React)
-│   │   └── src/
-│   │       ├── app/
-│   │       │   ├── (chat)/          # Authenticated chat routes (layout + pages)
-│   │       │   ├── code/            # Code mode routes
-│   │       │   ├── sign-in/page.tsx # GitHub OAuth sign-in
-│   │       │   └── onboarding/page.tsx # BYOK API key setup
-│   │       ├── components/
-│   │       │   ├── auth-guard.tsx   # Session guard — redirects to /sign-in
-│   │       │   ├── mode-switcher.tsx
-│   │       │   └── resizable-grid.tsx
-│   │       └── lib/
-│   │           └── auth-client.ts   # Better Auth React client
-│   └── worker/                # Cloudflare Workers API
-│       ├── src/
-│       │   ├── index.ts       # Hono app — routes, CORS, auth, body limits
-│       │   ├── auth.ts        # Better Auth setup
-│       │   ├── chat.ts        # AI streaming via Letta provider
-│       │   ├── crypto.ts      # AES-GCM encryption for BYOK API keys
-│       │   ├── db.ts          # D1 query functions (conversations, messages, keys)
-│       │   ├── exa.ts         # Exa AI web search
-│       │   ├── firecrawl.ts   # Firecrawl URL extraction
-│       │   ├── keys.ts        # BYOK key resolution (decrypt + lookup)
-│       │   ├── middleware.ts   # Session + auth middleware
-│       │   ├── sanitize.ts    # Error/secret sanitization
-│       │   ├── schema.ts      # Drizzle ORM schema
-│       │   ├── types.ts       # Shared TypeScript types
-│       │   └── validate.ts    # Input validators
-│       ├── package.json
-│       ├── tsconfig.json
-│       └── wrangler.jsonc
-├── packages/
-│   └── provider/              # @nosis/provider — Letta AI SDK wrapper
-├── package.json               # Monorepo root (workspaces, turbo delegation)
-├── turbo.json                 # Task orchestration
-└── biome.jsonc                # Shared lint/format config (Ultracite)
+The system is now web/worker-first. Desktop is a thin host around the web runtime.
+
+## Topology
+
+1. UI runs in Next.js (`apps/web`) and talks to Worker HTTP APIs.
+2. Worker (`apps/worker`) handles auth, persistence, chat streaming, MCP tool wiring, and GitHub actions.
+3. Desktop (`apps/desktop`) opens the web client in a Tauri webview and keeps native packaging/simple shell capabilities.
+
+## Monorepo Layout
+
+```text
+apps/
+  desktop/
+    src/
+      main.ts            # minimal desktop placeholder UI
+      styles.css
+    src-tauri/
+      src/lib.rs         # minimal Tauri builder (opener plugin)
+      src/main.rs
+      tauri.conf.json    # webview points to nosis-web.localhost in dev
+  web/
+    src/
+      app/
+        (app)/           # authenticated app shell
+          layout.tsx     # AuthGuard + CodeWorkspaceProvider + shared split layout
+          (chat)/        # chat mode routes
+          code/          # code mode routes
+      components/
+        code-sidebar.tsx
+        code-workspace-provider.tsx
+        github-controls-panel.tsx
+        resizable-grid.tsx
+      hooks/
+        use-conversations.ts
+        use-nosis-chat.ts
+        use-github-controls.ts
+      lib/
+        worker-api.ts
+        git-ops.ts
+        git-workspace-runtime.ts
+  worker/
+    src/
+      index.ts           # Hono routes + middleware + error handling
+      auth.ts            # Better Auth setup (GitHub OAuth)
+      middleware.ts      # session/auth helpers + GitHub token access
+      db.ts              # D1 query layer
+      schema.ts          # Drizzle schema
+      chat.ts            # AI streaming + MCP tool loading
+      mcp.ts             # MCP client discovery/connection by execution target
+      github.ts          # typed GitHub REST wrapper + conflict normalization
+      validate.ts        # request/input validation
+      sanitize.ts        # secret redaction
+    drizzle/
+      *.sql              # generated migrations
+      meta/*.json        # generated snapshots/journal
+packages/
+  provider/              # @nosis/provider (Letta provider wrapper)
+  ui/                    # shared UI components
 ```
 
-## Backend (Rust / Tauri)
+## Desktop Runtime (`apps/desktop`)
 
-The Rust backend is a thin desktop shell focused on window management, hotkeys, local secret storage, Arcade AI tools, and MCP server management. Conversation/message CRUD and AI streaming are handled by the Worker API.
+Current desktop architecture is intentionally minimal:
 
-### Database — SQLite via sqlx 0.8
+- Tauri starts with `tauri::Builder::default()` and the opener plugin only.
+- Dev webview URL points at `http://nosis-web.localhost:1355`.
+- Frontend entry (`src/main.ts`) renders a wrapper placeholder.
 
-- **Location**: `~/.local/share/com.nosis.app/nosis.db`
-- **Pool**: 2 connections (1 writer + 1 reader under WAL)
-- **PRAGMAs**: WAL journal, synchronous=NORMAL, 64MB cache, memory temp_store, 256MB mmap
-- **Migrations**: Hand-rolled versioned system in `db.rs`. Each version is a `(i64, Vec<&str>)` applied once inside a transaction, tracked in `schema_version` table.
-- **Note**: Conversation/message tables remain in local schema for backward compatibility but are no longer written to by Tauri commands. Active data lives in D1 (Worker).
+This branch removes prior desktop Rust subsystems (local DB, secret store, window-placement commands, Arcade/MCP IPC) in favor of Worker-based capabilities.
 
-### IPC Commands
+## Web App Architecture (`apps/web`)
 
-All commands go through `tauri::command` and are callable from the frontend via `invoke()`.
+### Route Model
 
-| Command | Description |
-|---|---|
-| `store_api_key` | Store encrypted API key by provider name |
-| `get_api_key` | Retrieve API key by provider name |
-| `has_api_key` | Check if API key exists |
-| `delete_api_key` | Remove API key |
-| `set_placement_mode` | Set window placement mode |
-| `get_placement_mode` | Get current placement mode |
-| `dismiss_window` | Hide main window |
-| `arcade_set_config` | Configure Arcade AI integration |
-| `arcade_get_config` | Get Arcade config status |
-| `arcade_delete_config` | Remove Arcade config |
-| `arcade_list_tools` | List available Arcade tools |
-| `arcade_authorize_tool` | Start Arcade tool authorization |
-| `arcade_check_auth_status` | Check Arcade auth status |
-| `arcade_execute_tool` | Execute an Arcade tool |
-| `add_mcp_server` | Register an MCP server |
-| `list_mcp_servers` | List registered MCP servers |
-| `delete_mcp_server` | Remove an MCP server |
-| `start_oauth_callback_server` | Start OAuth callback for MCP auth |
-| `shutdown_oauth_session` | Clean up OAuth session |
+- Root layout (`app/layout.tsx`) sets fonts/theme globals.
+- Authenticated shell lives under `app/(app)/layout.tsx`.
+- Chat mode:
+  - `/(app)/(chat)` home
+  - `/(app)/(chat)/chat/[id]` conversation
+- Code mode:
+  - `/(app)/code` home
+  - `/(app)/code/new` new project/workspace flow
+  - `/(app)/code/[id]` code conversation + GitHub control panel
 
-### Security
+### Shared Client State
 
-- **Secret Store**: Custom encrypted store backed by iota_stronghold with Argon2 KDF. Salt file at `{app_data}/salt.txt`.
-- **CSP**: Locked down — self-only with wasm-unsafe-eval for script, unsafe-inline for style, ipc: for Tauri bridge, https://*.workers.dev for Worker API (to be pinned to exact production URL).
-- **Input validation**: UUID format checks, length limits, URL validation. DB errors are sanitized before reaching frontend.
+`CodeWorkspaceProvider` centralizes:
 
-### Global Hotkey
+- conversation list (sandbox-targeted)
+- project/workspace catalog
+- selected project/workspace persistence via `localStorage`
+- create flows for project/workspace/conversation
 
-`Alt+Space` toggles main window visibility (show/hide + focus).
+### API Layer
 
-## Worker API (Cloudflare Workers / Hono)
+`src/lib/worker-api.ts` provides typed wrappers for:
 
-The Worker handles all data operations and AI streaming. Authenticated via Better Auth.
+- conversations/messages/chat
+- projects/workspaces
+- GitHub repos/branches/PRs
 
-### Endpoints
+All requests use cookie credentials and centralized `ApiError` mapping.
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/health` | Health check |
-| * | `/api/auth/*` | Better Auth (login, signup, session) |
-| PUT | `/api/keys/:provider` | Store encrypted BYOK API key |
-| GET | `/api/keys` | List configured providers |
-| DELETE | `/api/keys/:provider` | Remove API key |
-| POST | `/api/search` | Exa AI web search |
-| POST | `/api/extract` | Firecrawl URL content extraction |
-| POST | `/api/conversations` | Create conversation |
-| GET | `/api/conversations` | List conversations (paginated) |
-| GET | `/api/conversations/:id` | Get conversation |
-| PATCH | `/api/conversations/:id/title` | Update title |
-| PATCH | `/api/conversations/:id/agent` | Set Letta agent ID |
-| DELETE | `/api/conversations/:id` | Delete conversation (cascade) |
-| GET | `/api/conversations/:id/messages` | Get messages (paginated) |
-| POST | `/api/conversations/:id/messages` | Save message |
-| POST | `/api/conversations/:id/chat` | Stream AI chat via Letta |
+## Worker Architecture (`apps/worker`)
 
-## Frontend (TypeScript / Vite)
+### Middleware and Security
 
-Svelte UI is planned. Current modules:
+- `secureHeaders()` enabled globally.
+- CORS restricted to trusted origins (`tauri://localhost`, local dev origins in development).
+- JSON content-type guard on mutating requests.
+- `sessionMiddleware` resolves Better Auth session.
+- `requireAuth` enforced for `/api/*` routes.
 
-- `main.ts` — Entry point; Escape dismiss handler; exposes `window.__nosis_api` and `window.__nosis_invoke` in dev mode
-- `api.ts` — Typed HTTP client for Worker API (conversations, messages). Supports Bearer auth tokens.
-- `mcp-clients.ts` — MCP client connections, tool discovery, and aggregation
-- `mcp-oauth.ts` — OAuth PKCE flow for authenticating with MCP servers
+### Core Capability Areas
 
-**Dev server**: `localhost:1420`, HMR enabled. **Build target**: ES2021.
+1. Auth and session routes
+- `/api/auth/*`
 
-## Web App (Next.js / React)
+2. BYOK key management
+- `/api/keys/:provider` (`PUT`, `DELETE`)
+- `/api/keys` (`GET`)
 
-Browser-based client at `apps/web/`. Next.js 16 with React 19, authenticates via Better Auth (GitHub OAuth) against the Worker API.
+3. External retrieval tools
+- `/api/search` (Exa)
+- `/api/extract` (Firecrawl)
 
-- `auth-client.ts` — Better Auth React client with cookie credentials
-- `auth-guard.tsx` — Session-gated wrapper; redirects unauthenticated users to `/sign-in`
-- `sign-in/page.tsx` — GitHub OAuth sign-in page
-- `onboarding/page.tsx` — BYOK key entry for Letta, Exa, Firecrawl
-- `(chat)/` — Authenticated chat layout (sidebar + conversation pages)
-- `code/` — Code mode layout
+4. MCP server management
+- `/api/mcp/servers` (`POST`, `GET`)
+- `/api/mcp/servers/:id` (`DELETE`)
 
-**Dev server**: `localhost:3000` (Next.js default). CORS is configured on the Worker to allow this origin in development.
+5. Arcade integration
+- `/api/arcade/tools`
+- `/api/arcade/tools/:name/authorize`
+- `/api/arcade/auth/:id/status`
 
-## Build & Run
+6. GitHub integration
+- repos listing
+- branch listing/creation
+- PR listing/creation/detail
 
-```bash
-bun install                    # Install all workspace deps
-bun run build                  # Build all apps via turbo
-bun run dev                    # Dev all apps via turbo
+7. Project/workspace model
+- `/api/projects` (`POST`, `GET`)
+- `/api/workspaces` (`POST`, `GET`)
+- `/api/workspaces/:id` (`GET`)
 
-# Desktop app:
-cd apps/desktop && bun run tauri dev    # Dev mode (hot reload frontend + Rust rebuild)
-cd apps/desktop && bun run tauri build  # Production build
+8. Conversation and chat runtime
+- conversation CRUD + metadata updates (title/agent/execution target/workspace)
+- message list/create
+- streamed chat endpoint
 
-# Worker:
-cd apps/worker && bun run dev           # Wrangler dev server
-cd apps/worker && bun run deploy        # Deploy to Cloudflare
-```
+### Chat Execution Model
 
-## Release Profile
+`streamChat()` flow:
 
-LTO enabled, opt-level=s, single codegen unit, symbols stripped — optimized for small binary size.
+1. Resolve conversation runtime (`letta_agent_id`, `execution_target`).
+2. Create/claim Letta agent atomically (race-safe).
+3. Save user message.
+4. Load active MCP tools based on execution target scopes.
+5. Stream model output.
+6. Persist assistant response and cleanup MCP clients after stream completion.
+
+### MCP Scope Behavior
+
+Execution target to MCP scopes is currently sandbox-only:
+
+- `sandbox` -> `global`, `sandbox`
+
+### Execution Surfaces
+
+Shared target taxonomy is defined in `@nosis/agent-runtime`:
+
+- cloud/worker: `sandbox`
+- desktop (planned runtime): `sandbox`, `local`
+
+Current guardrails:
+
+- Worker chat validation remains sandbox-only.
+- Web conversation hooks default to sandbox filtering.
+- Local desktop execution remains out-of-scope for this PR.
+- Web and validation layers consume taxonomy from `@nosis/agent-runtime/execution`
+  (no provider/runtime coupling).
+
+### Responsibility Split (Worker vs Web vs Shared)
+
+Actionable ownership boundaries:
+
+- Worker owns:
+  - authoritative execution-target validation/canonicalization
+  - agent lifecycle and stream orchestration
+  - tool loading policy + key/secret resolution
+  - office ownership/persistence integrity guarantees
+  - code locations: `apps/worker/src/validate.ts`, `apps/worker/src/chat.ts`, `apps/worker/src/runtime-adapter.ts`, `apps/worker/src/mcp.ts`, `apps/worker/src/db.ts`
+- Web owns:
+  - route/view semantics (`chat` vs `code`)
+  - request shaping and optimistic state
+  - default sandbox filtering for conversations
+  - code locations: `apps/web/src/app/(app)/layout.tsx`, `apps/web/src/components/app-sidebar.tsx`, `apps/web/src/features/chat/hooks/use-conversations.ts`
+- Desktop owns (planned runtime):
+  - local execution environment + filesystem bridge
+  - desktop-only capability adapters
+  - code location target: `apps/desktop/**`
+- Shared package owns:
+  - execution taxonomy (`@nosis/agent-runtime/execution`)
+  - runtime adapter contracts (`@nosis/agent-runtime/contracts`)
+  - shared agent primitives that are environment-agnostic
+  - code locations: `packages/agent-runtime/src/execution.ts`, `packages/agent-runtime/src/contracts.ts`, `packages/agent-runtime/src/agent-id.ts`, `packages/agent-runtime/src/index.ts`
+
+Cross-boundary rules:
+
+- Worker must not depend on UI route semantics.
+- Web must not own execution authority or key/secret resolution.
+- Shared package must not perform direct DB/network side effects tied to a specific app surface.
+
+## Data Model (D1 + Drizzle)
+
+Primary app tables:
+
+- `projects`
+  - office-owned (`office_id` required)
+- `workspaces`
+- `conversations` (`execution_target` is sandbox-only, `office_id` is required, `workspace_id` optional)
+- `messages`
+- `mcp_servers`
+- `user_api_keys`
+
+Auth tables are managed via Better Auth schema.
+
+## GitHub Controls Path
+
+Web UI (`github-controls-panel` + `use-github-controls`) calls Worker GitHub endpoints through `worker-api.ts`.
+
+Runtime abstraction in `git-workspace-runtime.ts` supports:
+
+- remote branch/PR flows for web/cloud workspaces
+- local commit/push is intentionally not available in the web runtime
+
+## Build and Dev
+
+- Package manager: `bun`
+- Monorepo task orchestration: `turbo`
+- Dev entrypoints:
+  - `bun run dev` -> web + worker
+  - `bun run dev:desktop` -> desktop shell
+  - `bun run dev:all` -> all apps
+
+Portless dev URLs:
+
+- Worker API: `http://nosis-api.localhost:1355`
+- Web app: `http://nosis-web.localhost:1355`
+
+## Guardrails
+
+- Do not hand-edit Drizzle generated artifacts in `apps/worker/drizzle/**` unless explicitly requested.
+- Import runtime primitives through explicit subpaths (`@nosis/agent-runtime/execution`, `@nosis/agent-runtime/contracts`, `@nosis/agent-runtime/agent-id`) instead of the runtime root package.
+- Keep API-side validation strict (`validate.ts`) and sanitize error surfaces (`sanitize.ts`).

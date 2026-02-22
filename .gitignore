@@ -38,3 +38,6 @@ service-account*.json
 
 # Context (conductor)
 .context
+
+# Letta local session state
+.letta/settings.local.json

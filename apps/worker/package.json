@@ -15,6 +15,7 @@
     "db:reset": "rm -rf .wrangler/state && wrangler d1 migrations apply nosis-db --local"
   },
   "dependencies": {
+    "@nosis/agent-runtime": "workspace:*",
     "@ai-sdk/mcp": "^1.0.21",
     "@daytonaio/sdk": "^0.144.0",
     "@nosis/provider": "workspace:*",

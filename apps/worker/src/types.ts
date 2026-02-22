@@ -1,4 +1,12 @@
-import type { conversations, mcpServers, messages } from "./schema";
+import type { CloudExecutionTarget } from "@nosis/agent-runtime/execution";
+import type {
+  conversations,
+  offices,
+  mcpServers,
+  messages,
+  projects,
+  workspaces,
+} from "./schema";
 
 // ── Worker Bindings ──
 
@@ -119,6 +127,15 @@ export interface DaytonaExecuteResponse {
 // ── Conversations ──
 
 export type Conversation = typeof conversations.$inferSelect;
+export type ConversationExecutionTarget = CloudExecutionTarget;
+
+// ── Projects / Workspaces ──
+
+export type Office = typeof offices.$inferSelect;
+export type Project = typeof projects.$inferSelect;
+export type Workspace = typeof workspaces.$inferSelect;
+export type WorkspaceKind = (typeof workspaces.$inferSelect)["kind"];
+export type WorkspaceStatus = (typeof workspaces.$inferSelect)["status"];
 
 // ── Messages ──
 
@@ -127,3 +144,51 @@ export type Message = typeof messages.$inferSelect;
 // ── MCP Servers ──
 
 export type McpServer = typeof mcpServers.$inferSelect;
+export type McpServerScope = (typeof mcpServers.$inferSelect)["scope"];
+
+// ── GitHub ──
+
+export interface GithubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: { login: string; avatar_url: string };
+  private: boolean;
+  default_branch: string;
+  updated_at: string;
+}
+
+export interface GithubPR {
+  number: number;
+  title: string;
+  state: string;
+  head: { ref: string; sha: string };
+  base: { ref: string };
+  user: { login: string; avatar_url: string };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GithubPRDetail extends GithubPR {
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  body: string | null;
+}
+
+export interface GithubCheckRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  html_url: string;
+  app: { name: string; slug: string } | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface GithubBranch {
+  name: string;
+  commit: { sha: string };
+  protected: boolean;
+}

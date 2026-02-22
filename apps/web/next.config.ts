@@ -16,6 +16,18 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: "../..",
   },
+  redirects: async () => [
+    {
+      source: "/chats",
+      destination: "/",
+      permanent: false,
+    },
+    {
+      source: "/chats/:id",
+      destination: "/chat/:id",
+      permanent: false,
+    },
+  ],
   headers: async () => [{ source: "/(.*)", headers: securityHeaders }],
 };
 

@@ -1,337 +1,427 @@
-import { generateText, jsonSchema, stepCountIs, streamText, tool } from "ai";
 import {
-  DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_HUMAN,
-  DEFAULT_MODEL,
-  createAgent,
-  createProvider,
-} from "@nosis/provider";
+  consumeStream,
+  convertToModelMessages,
+  pruneMessages,
+  stepCountIs,
+  streamText,
+  type LanguageModelUsage,
+  type ModelMessage,
+  type StepResult,
+  type ToolSet,
+  type UIMessage,
+} from "ai";
+import { resolveOrCreateAgentIdFromAdapter } from "@nosis/agent-runtime/agent-id";
+import { createProvider } from "@nosis/provider";
 import { HTTPException } from "hono/http-exception";
+import { buildSkillSystemPrompt, type ChatSkillId } from "./chat-skills";
 import {
   type AppDatabase,
-  getConversationAgent,
-  getConversationAgentId,
+  getConversationRuntime,
   saveMessageBatch,
-  trySetConversationAgent,
-  trySetConversationAgentId,
 } from "./db";
-import { getActiveTools } from "./mcp";
-import { sanitizeError, sanitizeRole } from "./sanitize";
+import { createWorkerRuntimeAdapter } from "./runtime-adapter";
 import type { Bindings } from "./types";
 
-/** Resolve or create the Letta agent for a conversation (race-safe). */
-async function resolveAgentId(
-  provider: ReturnType<typeof createProvider>,
-  db: AppDatabase,
-  conversationId: string,
-  userId: string,
-  existingAgentId: string | null,
-  ctx: ExecutionContext,
-  lettaApiKey: string
-): Promise<string> {
-  if (existingAgentId) {
-    return existingAgentId;
-  }
+const MAX_AGENT_STEPS = 8;
+const MAX_CONTEXT_MESSAGES = 24;
+const MAX_STEP_CONTEXT_MESSAGES = 18;
+const MAX_STORAGE_CHARS = 100_000;
+const MAX_ABORT_CAPTURE_CHARS = 200_000;
 
-  const newAgentId = await createAgent(provider, conversationId);
-  const wasSet = await trySetConversationAgentId(
-    db,
-    conversationId,
-    userId,
-    newAgentId
-  );
-  if (wasSet) {
-    return newAgentId;
-  }
-
-  // Another request won the race — fire-and-forget orphan cleanup
-  ctx.waitUntil(
-    provider.client.agents.delete(newAgentId).catch((err: unknown) => {
-      console.error(
-        "Failed to delete orphan agent:",
-        sanitizeError(err, [lettaApiKey])
-      );
-    })
-  );
-
-  const winnerAgentId = await getConversationAgentId(
-    db,
-    conversationId,
-    userId
-  );
-  if (!winnerAgentId) {
-    throw new HTTPException(500, {
-      message: "Failed to resolve agent for conversation",
-    });
-  }
-  return winnerAgentId;
+export interface StreamChatInput {
+  content?: string;
+  messages?: UIMessage[];
+  trigger: "submit-message" | "regenerate-message";
+  skillIds: readonly ChatSkillId[];
 }
 
-/** Max research tool calls per request — prevents unbounded Letta sub-calls. */
-const MAX_RESEARCH_CALLS_PER_REQUEST = 5;
+function trimForStorage(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= MAX_STORAGE_CHARS) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, MAX_STORAGE_CHARS - 29)}\n\n[Truncated for storage]`;
+}
 
-/**
- * Resolve or create a specialist Letta agent for a given role (race-safe).
- * Orphan cleanup mirrors the main agent pattern.
- */
-async function resolveSpecialistAgentId(
-  provider: ReturnType<typeof createProvider>,
-  db: AppDatabase,
-  conversationId: string,
-  userId: string,
-  role: string,
-  ctx: ExecutionContext,
-  lettaApiKey: string
-): Promise<string> {
-  const safeRole = sanitizeRole(role);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
-  const existing = await getConversationAgent(
-    db,
-    conversationId,
-    userId,
-    safeRole
-  );
-  if (existing) {
-    return existing;
+function summarizeUrlData(data: Record<string, unknown>): string {
+  const title = typeof data.title === "string" ? data.title : "Attached URL";
+  const url = typeof data.url === "string" ? data.url : undefined;
+  const content = typeof data.content === "string" ? data.content : undefined;
+  const header = url ? `[${title}](${url})` : title;
+  const excerpt = content ? content.slice(0, 12_000) : "";
+  return excerpt.length > 0 ? `${header}\n\n${excerpt}` : header;
+}
+
+function summarizeCodeFileData(data: Record<string, unknown>): string {
+  const filename =
+    typeof data.filename === "string" ? data.filename : "attached-file";
+  const language = typeof data.language === "string" ? data.language : "text";
+  const code = typeof data.code === "string" ? data.code : "";
+  const snippet = code.slice(0, 12_000);
+  return `\`\`\`${language}\n// ${filename}\n${snippet}\n\`\`\``;
+}
+
+function summarizeGenericData(
+  type: string,
+  data: Record<string, unknown>
+): string | null {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(data);
+  } catch {
+    return `[${type}] [Unserializable data payload]`;
+  }
+  if (!serialized || serialized.length <= 2) {
+    return null;
+  }
+  return `[${type}] ${serialized.slice(0, 6000)}`;
+}
+
+function summarizeDataPart(part: {
+  type: string;
+  data: unknown;
+}): string | null {
+  if (!isRecord(part.data)) {
+    return null;
   }
 
-  const agent = await provider.client.agents.create({
-    name: `nosis-${safeRole}-${conversationId.slice(0, 8)}`,
-    model: DEFAULT_MODEL,
-    contextWindowLimit: DEFAULT_CONTEXT_WINDOW,
-    memoryBlocks: [
-      {
-        label: "persona",
-        value:
-          "You are a focused research specialist. Provide accurate, concise answers with citations when available.",
-        limit: 2000,
-      },
-      { label: "human", value: DEFAULT_HUMAN, limit: 5000 },
-    ],
+  if (part.type === "data-url") {
+    return summarizeUrlData(part.data);
+  }
+  if (part.type === "data-code-file") {
+    return summarizeCodeFileData(part.data);
+  }
+
+  return summarizeGenericData(part.type, part.data);
+}
+
+function summarizeUserMessageForStorage(message: UIMessage): string {
+  const chunks: string[] = [];
+
+  for (const part of message.parts) {
+    if (part.type === "text") {
+      const text = part.text.trim();
+      if (text.length > 0) {
+        chunks.push(text);
+      }
+      continue;
+    }
+
+    if (part.type === "file") {
+      const label = part.filename ?? part.mediaType ?? part.url.slice(0, 120);
+      chunks.push(`[Attached file: ${label}]`);
+      continue;
+    }
+
+    if (part.type.startsWith("data-") && "data" in part) {
+      const summary = summarizeDataPart({ type: part.type, data: part.data });
+      if (summary) {
+        chunks.push(summary);
+      }
+    }
+  }
+
+  if (chunks.length === 0) {
+    return "[Sent non-text content]";
+  }
+
+  return trimForStorage(chunks.join("\n\n"));
+}
+
+function latestUserMessage(messages: readonly UIMessage[]): UIMessage | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "user") {
+      return message;
+    }
+  }
+  return null;
+}
+
+function compactModelMessages(
+  messages: ModelMessage[],
+  maxMessages: number
+): ModelMessage[] {
+  if (messages.length <= maxMessages) {
+    return messages;
+  }
+
+  if (messages[0]?.role === "system") {
+    return [messages[0], ...messages.slice(-(maxMessages - 1))];
+  }
+
+  return messages.slice(-maxMessages);
+}
+
+function pruneForPrompt(
+  messages: ModelMessage[],
+  maxMessages: number
+): ModelMessage[] {
+  const pruned = pruneMessages({
+    messages,
+    reasoning: "before-last-message",
+    toolCalls: "before-last-3-messages",
+    emptyMessages: "remove",
+  });
+  return compactModelMessages(pruned, maxMessages);
+}
+
+async function toModelMessages(messages: UIMessage[]): Promise<ModelMessage[]> {
+  const normalized = messages.map(({ id: _id, ...message }) => message);
+  const converted = await convertToModelMessages(normalized, {
+    ignoreIncompleteToolCalls: true,
+    convertDataPart: (part) => {
+      const summary = summarizeDataPart({ type: part.type, data: part.data });
+      if (!summary) {
+        return undefined;
+      }
+      return { type: "text", text: summary };
+    },
   });
 
-  const won = await trySetConversationAgent(
-    db,
-    conversationId,
-    userId,
-    safeRole,
-    agent.id
-  );
-  if (won) {
-    return agent.id;
-  }
-
-  // Lost the race — clean up orphan and use the winner's agent
-  ctx.waitUntil(
-    provider.client.agents.delete(agent.id).catch((err: unknown) => {
-      console.error(
-        "Failed to delete orphan specialist agent:",
-        sanitizeError(err, [lettaApiKey])
-      );
-    })
-  );
-
-  const winnerId = await getConversationAgent(
-    db,
-    conversationId,
-    userId,
-    safeRole
-  );
-  if (!winnerId) {
-    throw new HTTPException(500, {
-      message: "Failed to resolve specialist agent",
-    });
-  }
-  return winnerId;
+  return pruneForPrompt(converted, MAX_CONTEXT_MESSAGES);
 }
 
+function toTokenCounts(usage: LanguageModelUsage): { in: number; out: number } {
+  return {
+    in: usage.inputTokens ?? 0,
+    out: usage.outputTokens ?? 0,
+  };
+}
+
+function summarizeAbort(steps: readonly StepResult<ToolSet>[]): {
+  text: string;
+  model: string | null;
+  tokensIn: number;
+  tokensOut: number;
+} {
+  const text = trimForStorage(
+    steps
+      .map((step) => step.text)
+      .join("")
+      .trim()
+  );
+  const model = steps.at(-1)?.model.modelId ?? null;
+  const usage = steps.reduce(
+    (acc, step) => {
+      acc.tokensIn += step.usage.inputTokens ?? 0;
+      acc.tokensOut += step.usage.outputTokens ?? 0;
+      return acc;
+    },
+    { tokensIn: 0, tokensOut: 0 }
+  );
+
+  return { text, model, ...usage };
+}
 export async function streamChat(
   db: AppDatabase,
   lettaApiKey: string,
   conversationId: string,
   userId: string,
-  content: string,
+  input: StreamChatInput,
   ctx: ExecutionContext,
   env: Bindings
 ): Promise<Response> {
-  // Lightweight lookup — verifies ownership and fetches agent ID.
-  const existingAgentId = await getConversationAgentId(
+  const runtime = await getConversationRuntime(db, conversationId, userId);
+  const runtimeAdapter = createWorkerRuntimeAdapter({
     db,
-    conversationId,
-    userId
-  );
-  const provider = createProvider(lettaApiKey);
-
-  const agentId = await resolveAgentId(
-    provider,
-    db,
-    conversationId,
-    userId,
-    existingAgentId,
+    env,
     ctx,
-    lettaApiKey
-  );
-
-  // Save user message and load MCP tools in parallel, both after agent resolution
-  // succeeds — if resolveAgentId throws, no message is persisted and the request
-  // is safely retriable without duplicates.
-  const [, { tools: mcpTools, cleanup }] = await Promise.all([
-    saveMessageBatch(
-      db,
-      crypto.randomUUID(),
-      conversationId,
-      "user",
-      content,
-      null,
-      0,
-      0
-    ),
-    getActiveTools(db, env, userId),
-  ]);
-
-  // Request-scoped cache: avoids repeated D1 lookups when the main agent calls
-  // the research tool multiple times within a single conversation turn.
-  let cachedSpecialistId: string | null = null;
-
-  // Request-scoped counter: prevents resource exhaustion from unbounded tool calls.
-  let researchCallCount = 0;
-
-  if ("research" in mcpTools) {
-    console.warn(
-      `[chat] MCP tool named "research" will be overridden by the built-in research tool [conversation=${conversationId}]`
-    );
-  }
-
-  const tools = {
-    ...mcpTools,
-    research: tool({
-      description:
-        "Delegate a focused research subtask to a specialist agent. Use this when you need to look up facts, explore a topic in depth, or gather information before answering.",
-      inputSchema: jsonSchema<{ query: string }>({
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            maxLength: 500,
-            description: "The research question or topic to investigate.",
-          },
-        },
-        required: ["query"],
-      }),
-      execute: async ({ query }) => {
-        // jsonSchema() constraints are advisory only — enforce at runtime.
-        if (typeof query !== "string" || query.length > 500) {
-          return "Research query exceeds maximum allowed length.";
-        }
-        const trimmedQuery = query.trim();
-        if (trimmedQuery.length === 0) {
-          return "Research query must not be empty.";
-        }
-
-        researchCallCount += 1;
-        if (researchCallCount > MAX_RESEARCH_CALLS_PER_REQUEST) {
-          return "Research tool call limit reached for this request.";
-        }
-
-        try {
-          if (!cachedSpecialistId) {
-            cachedSpecialistId = await resolveSpecialistAgentId(
-              provider,
-              db,
-              conversationId,
-              userId,
-              "research",
-              ctx,
-              lettaApiKey
-            );
-          }
-        } catch (err: unknown) {
-          const sanitized = sanitizeError(err, [lettaApiKey]);
-          console.error("Research specialist resolution error:", sanitized);
-          return `Failed to initialize research specialist: ${sanitized}`;
-        }
-
-        try {
-          const result = await generateText({
-            model: provider(),
-            providerOptions: {
-              letta: {
-                agent: { id: cachedSpecialistId },
-                timeoutInSeconds: 120,
-              },
-            },
-            prompt: trimmedQuery,
-          });
-          return result.text;
-        } catch (err: unknown) {
-          const sanitized = sanitizeError(err, [lettaApiKey]);
-          console.error("Research tool error:", sanitized);
-          return `Research failed: ${sanitized}`;
-        }
-      },
-    }),
-  };
-
-  const result = streamText({
-    model: provider(),
-    providerOptions: {
-      letta: {
-        agent: { id: agentId, streamTokens: true },
-        timeoutInSeconds: 300,
-      },
-    },
-    prompt: content,
-    tools,
-    // Two-layer defense against unbounded loops:
-    // 1. researchCallCount (primary) — enforced per-tool-call inside execute(),
-    //    works correctly even when the model fires multiple parallel calls in
-    //    one step because the counter increments synchronously before any await.
-    // 2. stepCountIs (secondary) — caps total model round-trips as a safety net
-    //    against non-research agentic loops. Set to MAX + 1 because the first
-    //    step is the initial prompt, so N+1 steps = N tool-response cycles.
-    stopWhen: stepCountIs(MAX_RESEARCH_CALLS_PER_REQUEST + 1),
-    onError({ error }) {
-      console.error("streamText error:", sanitizeError(error, [lettaApiKey]));
-    },
+    userId,
+    conversationId,
+    initialRuntime: runtime,
+    lettaApiKey,
+  });
+  const provider = createProvider(lettaApiKey);
+  const agentId = await resolveOrCreateAgentIdFromAdapter({
+    provider,
+    agentSeed: conversationId,
+    adapter: runtimeAdapter,
+    errorContext: `conversation=${conversationId}`,
+  }).catch((error: unknown) => {
+    throw new HTTPException(500, {
+      message:
+        error instanceof Error
+          ? error.message
+          : "Failed to resolve agent for conversation",
+    });
   });
 
-  // Persist assistant reply and clean up MCP clients after stream completes.
-  // Both must wait for the stream to finish: the save needs the full text,
-  // and MCP clients must stay open for tool calls during streaming.
-  ctx.waitUntil(
-    (async () => {
-      try {
-        const text = await result.text;
-        if (text.trim().length > 0) {
-          await saveMessageBatch(
-            db,
-            crypto.randomUUID(),
-            conversationId,
-            "assistant",
-            text,
-            null,
-            0,
-            0
-          );
-        }
-      } catch (err: unknown) {
-        console.error(
-          `Failed to save assistant message [conversation=${conversationId}]:`,
-          sanitizeError(err, [lettaApiKey])
+  const modelMessages = input.messages
+    ? await toModelMessages(input.messages)
+    : null;
+  const messagesForModel =
+    modelMessages && modelMessages.length > 0 ? modelMessages : undefined;
+  if (!(messagesForModel || input.content)) {
+    throw new HTTPException(400, {
+      message: "messages must contain at least one usable part",
+    });
+  }
+
+  const latestUser = input.messages ? latestUserMessage(input.messages) : null;
+  const userContent = latestUser
+    ? summarizeUserMessageForStorage(latestUser)
+    : (input.content?.trim() ?? "");
+  const shouldPersistUserMessage = input.trigger !== "regenerate-message";
+
+  if (shouldPersistUserMessage && userContent.length === 0) {
+    throw new HTTPException(400, {
+      message: "Could not determine user message content to persist",
+    });
+  }
+
+  // Save user message and load MCP tools in parallel (independent operations)
+  const toolsTask = runtimeAdapter.loadTools(runtime.execution_target);
+  let toolsResult: Awaited<typeof toolsTask>;
+  if (shouldPersistUserMessage) {
+    const [loadedTools] = await Promise.all([
+      toolsTask,
+      runtimeAdapter.saveUserMessage(trimForStorage(userContent)),
+    ]);
+    toolsResult = loadedTools;
+  } else {
+    toolsResult = await toolsTask;
+  }
+
+  const { tools, cleanup } = toolsResult;
+
+  const hasTools = Object.keys(tools).length > 0;
+  const systemPrompt = buildSkillSystemPrompt(input.skillIds);
+  const streamedTextChunks: string[] = [];
+  let streamedTextLength = 0;
+
+  let finalized = false;
+  const finalize = (task: () => Promise<void>): void => {
+    if (finalized) {
+      return;
+    }
+    finalized = true;
+    runtimeAdapter.schedule(
+      task().catch((error: unknown) => {
+        runtimeAdapter.onError(
+          `Failed finalization [conversation=${conversationId}]`,
+          error
         );
-      } finally {
-        await cleanup().catch(() => undefined);
-      }
-    })()
-  );
+      })
+    );
+  };
+
+  let result: ReturnType<typeof streamText>;
+  try {
+    result = streamText({
+      model: provider(),
+      providerOptions: {
+        letta: {
+          agent: { id: agentId, streamTokens: true },
+          timeoutInSeconds: 300,
+        },
+      },
+      ...(systemPrompt && { system: systemPrompt }),
+      ...(messagesForModel
+        ? { messages: messagesForModel }
+        : {
+            prompt: input.content ?? userContent,
+          }),
+      ...(hasTools && { tools }),
+      stopWhen: stepCountIs(MAX_AGENT_STEPS),
+      prepareStep: async ({ messages }) => ({
+        messages:
+          messages.length > MAX_STEP_CONTEXT_MESSAGES
+            ? pruneForPrompt(messages, MAX_STEP_CONTEXT_MESSAGES)
+            : messages,
+      }),
+      onChunk({ chunk }) {
+        if (chunk.type !== "text-delta") {
+          return;
+        }
+        if (streamedTextLength >= MAX_ABORT_CAPTURE_CHARS) {
+          return;
+        }
+        const next = chunk.text.slice(
+          0,
+          MAX_ABORT_CAPTURE_CHARS - streamedTextLength
+        );
+        if (next.length === 0) {
+          return;
+        }
+        streamedTextChunks.push(next);
+        streamedTextLength += next.length;
+      },
+      onFinish({ text, model, totalUsage }) {
+        finalize(async () => {
+          try {
+            const finalText = trimForStorage(text);
+            if (finalText.length > 0) {
+              const tokens = toTokenCounts(totalUsage);
+              await saveMessageBatch(
+                db,
+                crypto.randomUUID(),
+                conversationId,
+                "assistant",
+                finalText,
+                model.modelId,
+                tokens.in,
+                tokens.out
+              );
+            }
+          } finally {
+            await cleanup().catch(() => undefined);
+          }
+        });
+      },
+      onAbort({ steps }) {
+        finalize(async () => {
+          try {
+            const partial = summarizeAbort(steps);
+            const streamed = trimForStorage(streamedTextChunks.join(""));
+            const text = streamed.length > 0 ? streamed : partial.text;
+            if (text.length > 0) {
+              await saveMessageBatch(
+                db,
+                crypto.randomUUID(),
+                conversationId,
+                "assistant",
+                text,
+                partial.model,
+                partial.tokensIn,
+                partial.tokensOut
+              );
+            }
+          } finally {
+            await cleanup().catch(() => undefined);
+          }
+        });
+      },
+      onError({ error }) {
+        runtimeAdapter.onError("streamText error", error);
+      },
+    });
+  } catch (error: unknown) {
+    await cleanup().catch(() => undefined);
+    throw error;
+  }
 
   // Streaming bypasses Hono's secureHeaders() — reapply manually
-  return result.toTextStreamResponse({
+  return result.toUIMessageStreamResponse({
     headers: {
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "no-store",
       "X-Frame-Options": "DENY",
       "Referrer-Policy": "no-referrer",
     },
+    consumeSseStream: ({ stream }) =>
+      consumeStream({
+        stream,
+        onError: (error: unknown) => {
+          runtimeAdapter.onError(
+            `SSE consume error [conversation=${conversationId}]`,
+            error
+          );
+        },
+      }),
   });
 }

@@ -1,9 +1,8 @@
+import {
+  SANDBOX_EXECUTION_TARGET,
+  type CloudExecutionTarget,
+} from "@nosis/agent-runtime/execution";
 import { HTTPException } from "hono/http-exception";
-import type {
-  DaytonaCreateSandboxRequest,
-  DaytonaExecuteRequest,
-  DaytonaSandboxLanguage,
-} from "./types";
 
 const MAX_API_KEY_LENGTH = 500;
 const MIN_API_KEY_LENGTH = 8;
@@ -19,27 +18,35 @@ const MAX_CONTENT_LENGTH = 100_000;
 const MAX_MODEL_LENGTH = 100;
 const MAX_AGENT_ID_LENGTH = 200;
 const MAX_TOKEN_COUNT = 10_000_000; // 10 M — well above any model's context window
+const MAX_CHAT_MESSAGES = 200;
+const MAX_CHAT_SKILL_IDS = 12;
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 500;
-const MAX_DAYTONA_SANDBOX_ID_LENGTH = 200;
-const MAX_DAYTONA_SANDBOX_NAME_LENGTH = 100;
-const MAX_DAYTONA_COMMAND_LENGTH = 10_000;
-const MAX_DAYTONA_CWD_LENGTH = 2000;
-const MAX_DAYTONA_ENV_VARS = 100;
-const MAX_DAYTONA_ENV_KEY_LENGTH = 100;
-const MAX_DAYTONA_ENV_VALUE_LENGTH = 2000;
-const MAX_DAYTONA_TIMEOUT_SECONDS = 300;
-const MAX_DAYTONA_AUTO_STOP_MINUTES = 43_200; // 30 days
+const VALID_CHAT_TRIGGERS: ReadonlySet<string> = new Set([
+  "submit-message",
+  "regenerate-message",
+]);
+const CHAT_SKILL_ID_REGEX = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const VALID_WORKSPACE_KINDS: ReadonlySet<string> = new Set(["cloud"]);
+const VALID_WORKSPACE_STATUSES: ReadonlySet<string> = new Set([
+  "ready",
+  "provisioning",
+  "error",
+]);
+
+const MAX_REPO_URL_LENGTH = 500;
+const MAX_PROJECT_SEGMENT_LENGTH = 200;
+const MAX_OFFICE_NAME_LENGTH = 120;
+const MAX_WORKSPACE_NAME_LENGTH = 120;
+const MAX_BRANCH_NAME_LENGTH = 255;
+const MAX_PATH_LENGTH = 4000;
+const PROJECT_SEGMENT_RE = /^[a-zA-Z0-9._-]+$/;
+const REPO_DOT_GIT_SUFFIX_RE = /\.git$/i;
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const AGENT_ID_REGEX = /^[a-zA-Z0-9._:-]+$/;
-const DAYTONA_SANDBOX_ID_REGEX = /^[a-zA-Z0-9._-]+$/;
-const DAYTONA_ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const VALID_DAYTONA_LANGUAGES: ReadonlySet<string> =
-  new Set<DaytonaSandboxLanguage>(["python", "typescript", "javascript"]);
 
 function badRequest(message: string): never {
   throw new HTTPException(400, { message });
@@ -109,8 +116,15 @@ export function validateContent(value: unknown): string {
   return value;
 }
 
+export function validateOptionalContent(value: unknown): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return validateContent(value);
+}
+
 export function validateModel(value: unknown): string | undefined {
-  if (value == null) {
+  if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value !== "string") {
@@ -128,7 +142,7 @@ export function validateTokenCount(
   value: unknown,
   field: string
 ): number | undefined {
-  if (value == null) {
+  if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
@@ -156,6 +170,212 @@ export function validateAgentId(value: unknown): string {
   return value;
 }
 
+export type ConversationExecutionTarget = CloudExecutionTarget;
+export type ChatRequestTrigger = "submit-message" | "regenerate-message";
+export type WorkspaceKind = "cloud";
+export type WorkspaceStatus = "ready" | "provisioning" | "error";
+
+export function validateChatTrigger(value: unknown): ChatRequestTrigger {
+  if (value === undefined || value === null) {
+    return "submit-message";
+  }
+  if (typeof value !== "string" || !VALID_CHAT_TRIGGERS.has(value)) {
+    badRequest("trigger must be one of: submit-message, regenerate-message");
+  }
+  return value as ChatRequestTrigger;
+}
+
+export function validateChatSkillIds(value: unknown): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    badRequest("skill_ids must be an array of strings");
+  }
+  if (value.length > MAX_CHAT_SKILL_IDS) {
+    badRequest(`skill_ids supports at most ${MAX_CHAT_SKILL_IDS} entries`);
+  }
+
+  const skillIds: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      badRequest("skill_ids must be an array of strings");
+    }
+    const trimmed = item.trim();
+    if (!CHAT_SKILL_ID_REGEX.test(trimmed)) {
+      badRequest(
+        "Each skill ID must match /^[a-z0-9][a-z0-9._-]{0,63}$/ format"
+      );
+    }
+    skillIds.push(trimmed);
+  }
+  return skillIds;
+}
+
+export function validateChatMessageCount(count: number): void {
+  if (!Number.isInteger(count) || count < 0) {
+    badRequest("messages must be a valid array");
+  }
+  if (count > MAX_CHAT_MESSAGES) {
+    badRequest(`messages supports at most ${MAX_CHAT_MESSAGES} items`);
+  }
+}
+
+export function validateExecutionTarget(
+  value: unknown
+): ConversationExecutionTarget {
+  if (value === SANDBOX_EXECUTION_TARGET) {
+    return SANDBOX_EXECUTION_TARGET;
+  }
+  badRequest(`execution_target must be '${SANDBOX_EXECUTION_TARGET}'`);
+}
+
+function parseOwnerRepoPath(
+  path: string
+): { owner: string; repo: string } | null {
+  const trimmed = path.trim().replace(/^\/+|\/+$/g, "");
+  const parts = trimmed.split("/");
+  if (parts.length !== 2) {
+    return null;
+  }
+  const [ownerRaw, repoRaw] = parts;
+  const owner = ownerRaw.trim();
+  const repoWithoutSuffix = repoRaw.trim().replace(REPO_DOT_GIT_SUFFIX_RE, "");
+  if (owner.length === 0 || repoWithoutSuffix.length === 0) {
+    return null;
+  }
+  return { owner, repo: repoWithoutSuffix };
+}
+
+function validateProjectSegment(value: string, field: string): void {
+  if (
+    value.length === 0 ||
+    value.length > MAX_PROJECT_SEGMENT_LENGTH ||
+    !PROJECT_SEGMENT_RE.test(value)
+  ) {
+    badRequest(`${field} contains invalid characters in GitHub repository URL`);
+  }
+}
+
+export interface CanonicalGithubRepo {
+  repo_url: string;
+  owner: string;
+  repo: string;
+}
+
+export function canonicalizeGithubRepoUrl(value: unknown): CanonicalGithubRepo {
+  if (typeof value !== "string") {
+    badRequest("repo_url must be a string");
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_REPO_URL_LENGTH) {
+    badRequest(`repo_url must be 1-${MAX_REPO_URL_LENGTH} characters`);
+  }
+
+  let ownerRepo: { owner: string; repo: string } | null = null;
+  const scpPrefix = "git@github.com:";
+  if (trimmed.toLowerCase().startsWith(scpPrefix)) {
+    ownerRepo = parseOwnerRepoPath(trimmed.slice(scpPrefix.length));
+  } else {
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      badRequest("repo_url must be a valid GitHub repository URL");
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host !== "github.com") {
+      badRequest("repo_url must target github.com");
+    }
+    ownerRepo = parseOwnerRepoPath(parsed.pathname);
+  }
+
+  if (!ownerRepo) {
+    badRequest("repo_url must be a valid GitHub origin URL");
+  }
+
+  validateProjectSegment(ownerRepo.owner, "owner");
+  validateProjectSegment(ownerRepo.repo, "repo");
+
+  return {
+    repo_url: `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}`,
+    owner: ownerRepo.owner,
+    repo: ownerRepo.repo,
+  };
+}
+
+export function validateWorkspaceKind(value: unknown): WorkspaceKind {
+  if (typeof value !== "string" || !VALID_WORKSPACE_KINDS.has(value)) {
+    badRequest("kind must be: cloud");
+  }
+  return value as WorkspaceKind;
+}
+
+export function validateWorkspaceStatus(value: unknown): WorkspaceStatus {
+  if (typeof value !== "string" || !VALID_WORKSPACE_STATUSES.has(value)) {
+    badRequest("status must be one of: ready, provisioning, error");
+  }
+  return value as WorkspaceStatus;
+}
+
+function validateBoundedString(
+  value: unknown,
+  field: string,
+  maxLength: number
+): string {
+  if (typeof value !== "string") {
+    badRequest(`${field} must be a string`);
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > maxLength) {
+    badRequest(`${field} must be 1-${maxLength} characters`);
+  }
+  return trimmed;
+}
+
+export function validateWorkspaceName(value: unknown): string {
+  return validateBoundedString(value, "name", MAX_WORKSPACE_NAME_LENGTH);
+}
+
+export function validateOfficeName(value: unknown): string {
+  return validateBoundedString(value, "name", MAX_OFFICE_NAME_LENGTH);
+}
+
+export function validateBranchName(value: unknown, field: string): string {
+  return validateBoundedString(value, field, MAX_BRANCH_NAME_LENGTH);
+}
+
+export function validateOptionalText(
+  value: unknown,
+  field: string,
+  maxLength: number
+): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  return validateBoundedString(value, field, maxLength);
+}
+
+export function validateOptionalPath(
+  value: unknown,
+  field: string
+): string | null {
+  return validateOptionalText(value, field, MAX_PATH_LENGTH);
+}
+
+export function validateNullableUuid(
+  value: unknown,
+  field: string
+): string | null {
+  if (value === null) {
+    return null;
+  }
+  if (value === undefined) {
+    badRequest(`${field} is required`);
+  }
+  return validateUuid(value, field);
+}
+
 export function validatePagination(
   limit: unknown,
   offset: unknown
@@ -163,16 +383,9 @@ export function validatePagination(
   const parsedLimit = parsePageParam(limit, "limit", DEFAULT_PAGE_SIZE);
   const parsedOffset = parsePageParam(offset, "offset", 0);
 
-  if (parsedLimit < 1 || parsedLimit > MAX_PAGE_SIZE) {
-    badRequest(`limit must be between 1 and ${MAX_PAGE_SIZE}`);
-  }
-  if (parsedOffset < 0) {
-    badRequest("offset must be non-negative");
-  }
-
   return {
-    limit: parsedLimit,
-    offset: parsedOffset,
+    limit: Math.max(1, Math.min(parsedLimit, MAX_PAGE_SIZE)),
+    offset: Math.max(0, parsedOffset),
   };
 }
 
@@ -181,7 +394,7 @@ function parsePageParam(
   field: string,
   defaultValue: number
 ): number {
-  if (value == null) {
+  if (value === undefined || value === null) {
     return defaultValue;
   }
   const n = Number(value);
@@ -208,6 +421,7 @@ const MCP_NAME_REGEX = /^[a-zA-Z0-9_-]+$/;
 const MAX_MCP_NAME_LENGTH = 100;
 const MAX_MCP_URL_LENGTH = 2000;
 const VALID_MCP_AUTH_TYPES: ReadonlySet<string> = new Set(["none", "api_key"]);
+const VALID_MCP_SCOPES: ReadonlySet<string> = new Set(["global", "sandbox"]);
 
 // ── SSRF: Private / Reserved Network Detection ──
 
@@ -317,6 +531,7 @@ function isBlockedMcpHost(hostname: string): boolean {
 }
 
 export type McpAuthType = "none" | "api_key";
+export type McpScope = "global" | "sandbox";
 
 export function validateMcpName(value: unknown): string {
   if (typeof value !== "string") {
@@ -379,6 +594,64 @@ export function validateMcpAuthType(value: unknown): McpAuthType {
   return value as McpAuthType;
 }
 
+export function validateMcpScope(value: unknown): McpScope {
+  if (typeof value !== "string" || !VALID_MCP_SCOPES.has(value)) {
+    badRequest("scope must be one of: global, sandbox");
+  }
+  return value as McpScope;
+}
+
+// ── GitHub Params ──
+
+const MAX_OWNER_LENGTH = 40;
+const MAX_REPO_NAME_LENGTH = 100;
+const OWNER_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/;
+const REPO_REGEX = /^[a-zA-Z0-9._-]+$/;
+
+export function validateOwner(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_OWNER_LENGTH
+  ) {
+    badRequest("owner must be a string of 1-40 characters");
+  }
+  if (!OWNER_REGEX.test(value)) {
+    badRequest("owner contains invalid characters");
+  }
+  return value;
+}
+
+export function validateRepoName(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_REPO_NAME_LENGTH
+  ) {
+    badRequest("repo must be a string of 1-100 characters");
+  }
+  if (!REPO_REGEX.test(value)) {
+    badRequest("repo contains invalid characters");
+  }
+  // Reject dot-only segments that would cause path traversal when interpolated
+  // into a URL (e.g. ".." → /repos/owner/../pulls resolves to /repos/pulls).
+  if (value === "." || value === "..") {
+    badRequest("repo contains invalid characters");
+  }
+  return value;
+}
+
+export function validatePullNumber(value: unknown): number {
+  if (typeof value !== "string" && typeof value !== "number") {
+    badRequest("pull_number must be a positive integer");
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 999_999_999) {
+    badRequest("pull_number must be a positive integer");
+  }
+  return n;
+}
+
 // ── API Key Validation ──
 
 export function validateApiKeyInput(value: unknown): string {
@@ -395,233 +668,4 @@ export function validateApiKeyInput(value: unknown): string {
     );
   }
   return trimmed;
-}
-
-// ── Daytona Validation ──
-
-function validateOptionalInteger(
-  value: unknown,
-  field: string,
-  min: number,
-  max: number
-): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const n =
-    typeof value === "string" && value.trim().length > 0
-      ? Number(value)
-      : value;
-
-  if (typeof n !== "number" || Number.isNaN(n) || !Number.isInteger(n)) {
-    badRequest(`${field} must be an integer`);
-  }
-  if (n < min || n > max) {
-    badRequest(`${field} must be between ${min} and ${max}`);
-  }
-  return n;
-}
-
-function validateDaytonaLanguage(
-  value: unknown
-): DaytonaSandboxLanguage | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== "string" || !VALID_DAYTONA_LANGUAGES.has(value)) {
-    badRequest(
-      `language must be one of: ${[...VALID_DAYTONA_LANGUAGES].join(", ")}`
-    );
-  }
-  return value as DaytonaSandboxLanguage;
-}
-
-function validateDaytonaName(value: unknown): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== "string") {
-    badRequest("name must be a string");
-  }
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    badRequest("name must not be empty");
-  }
-  if (trimmed.length > MAX_DAYTONA_SANDBOX_NAME_LENGTH) {
-    badRequest(
-      `name exceeds maximum length of ${MAX_DAYTONA_SANDBOX_NAME_LENGTH} characters`
-    );
-  }
-  return trimmed;
-}
-
-function validateDaytonaEnv(
-  value: unknown
-): Record<string, string> | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    badRequest("env must be an object");
-  }
-
-  const raw = value as Record<string, unknown>;
-  const entries = Object.entries(raw);
-  if (entries.length > MAX_DAYTONA_ENV_VARS) {
-    badRequest(`env supports at most ${MAX_DAYTONA_ENV_VARS} keys`);
-  }
-
-  const clean: Record<string, string> = {};
-  for (const [key, rawValue] of entries) {
-    if (key.length === 0 || key.length > MAX_DAYTONA_ENV_KEY_LENGTH) {
-      badRequest(
-        `env key length must be between 1 and ${MAX_DAYTONA_ENV_KEY_LENGTH}`
-      );
-    }
-    if (!DAYTONA_ENV_KEY_REGEX.test(key)) {
-      badRequest(`env key '${key}' is invalid`);
-    }
-    if (typeof rawValue !== "string") {
-      badRequest(`env value for key '${key}' must be a string`);
-    }
-    if (rawValue.length > MAX_DAYTONA_ENV_VALUE_LENGTH) {
-      badRequest(
-        `env value for key '${key}' exceeds maximum length of ${MAX_DAYTONA_ENV_VALUE_LENGTH}`
-      );
-    }
-    clean[key] = rawValue;
-  }
-
-  return clean;
-}
-
-export function validateDaytonaTimeoutSeconds(
-  value: unknown,
-  field = "timeout"
-): number | undefined {
-  return validateOptionalInteger(value, field, 0, MAX_DAYTONA_TIMEOUT_SECONDS);
-}
-
-export function validateDaytonaSandboxId(value: unknown): string {
-  if (typeof value !== "string") {
-    badRequest("sandbox id must be a string");
-  }
-  const trimmed = value.trim();
-  if (
-    trimmed.length === 0 ||
-    trimmed.length > MAX_DAYTONA_SANDBOX_ID_LENGTH ||
-    !DAYTONA_SANDBOX_ID_REGEX.test(trimmed)
-  ) {
-    badRequest("sandbox id is invalid");
-  }
-  return trimmed;
-}
-
-export function validateDaytonaCreateSandboxRequest(
-  body: unknown
-): DaytonaCreateSandboxRequest {
-  if (body === null || typeof body !== "object" || Array.isArray(body)) {
-    badRequest("Request body must be a JSON object");
-  }
-
-  const raw = body as Record<string, unknown>;
-  const request: DaytonaCreateSandboxRequest = {};
-
-  const name = validateDaytonaName(raw.name);
-  if (name !== undefined) {
-    request.name = name;
-  }
-
-  const language = validateDaytonaLanguage(raw.language);
-  if (language !== undefined) {
-    request.language = language;
-  }
-
-  const autoStopInterval = validateOptionalInteger(
-    raw.autoStopInterval,
-    "autoStopInterval",
-    0,
-    MAX_DAYTONA_AUTO_STOP_MINUTES
-  );
-  if (autoStopInterval !== undefined) {
-    request.autoStopInterval = autoStopInterval;
-  }
-
-  const timeout = validateDaytonaTimeoutSeconds(raw.timeout);
-  if (timeout !== undefined) {
-    request.timeout = timeout;
-  }
-
-  const envVars = validateDaytonaEnv(raw.envVars);
-  if (envVars !== undefined) {
-    request.envVars = envVars;
-  }
-
-  return request;
-}
-
-export function validateDaytonaExecuteRequest(
-  body: unknown
-): DaytonaExecuteRequest {
-  if (body === null || typeof body !== "object" || Array.isArray(body)) {
-    badRequest("Request body must be a JSON object");
-  }
-
-  const raw = body as Record<string, unknown>;
-
-  if (typeof raw.command !== "string") {
-    badRequest("command must be a string");
-  }
-  const command = raw.command.trim();
-  if (command.length === 0) {
-    badRequest("command must not be empty");
-  }
-  if (command.length > MAX_DAYTONA_COMMAND_LENGTH) {
-    badRequest(
-      `command exceeds maximum length of ${MAX_DAYTONA_COMMAND_LENGTH} characters`
-    );
-  }
-
-  let cwd: string | undefined;
-  if (raw.cwd !== undefined) {
-    if (typeof raw.cwd !== "string") {
-      badRequest("cwd must be a string");
-    }
-    const trimmed = raw.cwd.trim();
-    if (trimmed.length === 0) {
-      badRequest("cwd must not be empty");
-    }
-    if (trimmed.length > MAX_DAYTONA_CWD_LENGTH) {
-      badRequest(
-        `cwd exceeds maximum length of ${MAX_DAYTONA_CWD_LENGTH} characters`
-      );
-    }
-    cwd = trimmed;
-  }
-
-  const env = validateDaytonaEnv(raw.env);
-  const timeout = validateDaytonaTimeoutSeconds(raw.timeout);
-
-  return {
-    command,
-    cwd,
-    env,
-    timeout,
-  };
-}
-
-export function requestHasBody(headers: {
-  get(name: string): string | null;
-}): boolean {
-  const contentLength = headers.get("content-length");
-  if (contentLength !== null) {
-    const parsed = Number(contentLength);
-    if (!Number.isNaN(parsed)) {
-      return parsed > 0;
-    }
-    return true;
-  }
-
-  return headers.get("transfer-encoding") !== null;
 }

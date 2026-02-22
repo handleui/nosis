@@ -2,6 +2,12 @@
 
 Tauri 2 desktop AI chat client for macOS. Turborepo monorepo with Rust backend, Svelte frontend (planned), and a Next.js web client.
 
+## Runtime split
+- Web (`apps/web`) owns the app UI and client state.
+- Worker (`apps/worker`) owns auth, persistence, chat, and tool wiring.
+- Desktop (`apps/desktop`) is a thin Tauri host around the web runtime.
+- Shared execution target taxonomy lives in `packages/agent-runtime`.
+
 ## Build
 
 ```bash
@@ -12,6 +18,7 @@ bun run dev              # dev all apps via turbo
 # Single app:
 turbo run dev --filter=nosis-desktop
 turbo run dev --filter=nosis-worker
+turbo run dev --filter=nosis-web
 
 # Tauri desktop specifically:
 cd apps/desktop && bun run tauri dev
@@ -22,9 +29,10 @@ Rust backend compiles on `tauri dev` automatically. Frontend is Vite on port 142
 
 ## Dev URLs (portless)
 
-The worker app uses [portless](https://github.com/nicepkg/portless) for stable dev URLs (no port conflicts):
+Both the worker and web apps use [portless](https://github.com/nicepkg/portless) for stable dev URLs (no port conflicts):
 
 - **Worker API**: `http://nosis-api.localhost:1355` (via `portless nosis-api`)
+- **Web client**: `http://nosis-web.localhost:1355` (via `portless nosis-web`)
 - **Desktop Vite**: `http://localhost:1420` (direct, consumed by Tauri webview — not proxied)
 
 Bypass portless with `PORTLESS=0 bun run dev`.
@@ -89,6 +97,7 @@ See `ARCHITECTURE.md` for full details.
 - Package manager: **bun** (not pnpm/npm/yarn)
 - Keep the binary small — release profile uses LTO + strip
 - Commits and PR titles use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, etc.)
+- Do not edit SQL migration files or Drizzle-generated files (`apps/worker/drizzle/**`) unless explicitly requested
 
 ## Code Quality
 

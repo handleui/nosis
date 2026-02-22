@@ -3,9 +3,9 @@
   "version": "0.2.0",
   "identifier": "com.nosis.app",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun --cwd ../web run dev",
     "beforeBuildCommand": "bun run build",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://nosis-web.localhost:1355",
     "frontendDist": "../dist"
   },
   "app": {
@@ -28,8 +28,5 @@
     "targets": ["dmg", "app"],
     "icon": []
   },
-  "plugins": {
-    "stronghold": {},
-    "global-shortcut": {}
-  }
+  "plugins": {}
 }
