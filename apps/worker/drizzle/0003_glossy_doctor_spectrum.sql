@@ -54,7 +54,7 @@ CREATE TABLE `__new_user_api_keys` (
 	`created_at` text DEFAULT (datetime('now')) NOT NULL,
 	`updated_at` text DEFAULT (datetime('now')) NOT NULL,
 	PRIMARY KEY(`user_id`, `provider`),
-	FOREIGN KEY (`user_id`) REFERENCES `offices`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
 INSERT INTO `__new_user_api_keys`("user_id", "provider", "encrypted_key", "created_at", "updated_at") SELECT "user_id", "provider", "encrypted_key", "created_at", "updated_at" FROM `user_api_keys`;--> statement-breakpoint

@@ -215,7 +215,7 @@ export const userApiKeys = sqliteTable(
   {
     user_id: text("user_id")
       .notNull()
-      .references(() => offices.id, { onDelete: "cascade" }),
+      .references(() => user.id, { onDelete: "cascade" }),
     provider: text("provider").notNull(),
     encrypted_key: text("encrypted_key").notNull(),
     created_at: text("created_at").notNull().default(sql`(datetime('now'))`),
